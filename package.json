@@ -1,0 +1,79 @@
+{
+  "name": "sshto",
+  "version": "1.0.0",
+  "description": "Linux SSH desktop client with jump hosts and SFTP",
+  "author": "sshTo contributors",
+  "license": "MIT",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron . --dev\"",
+    "build": "tsc --noEmit && vite build",
+    "start": "electron .",
+    "test": "vitest run",
+    "pack": "npm run build && electron-builder --linux AppImage deb",
+    "test:integration": "node scripts/integration.cjs",
+    "test:ui": "xvfb-run -a node scripts/ui-smoke.cjs",
+    "format": "prettier --write src electron scripts tests vite.config.ts"
+  },
+  "build": {
+    "appId": "io.sshto.desktop",
+    "productName": "sshTo",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Network",
+      "maintainer": "sshTo contributors <maintainers@sshto.local>",
+      "executableName": "sshto",
+      "icon": "build/icon.png",
+      "syncDesktopName": true
+    },
+    "npmRebuild": false,
+    "extraResources": [
+      {
+        "from": "build/help.html",
+        "to": "help.html"
+      },
+      {
+        "from": "README.md",
+        "to": "README.md"
+      }
+    ]
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "lucide-react": "^1.60.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "ssh2": "^1.17.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/ssh2": "^1.15.6",
+    "@vitejs/plugin-react": "^6.1.2",
+    "concurrently": "^10.0.6",
+    "electron": "^44.9.3",
+    "electron-builder": "^26.15.3",
+    "prettier": "^3.9.10",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.5",
+    "wait-on": "^9.5.1"
+  },
+  "type": "module",
+  "desktopName": "sshto.desktop",
+  "homepage": "file:///opt/sshTo/resources/help.html"
+}
