@@ -126,6 +126,27 @@ function waitEvent(service, predicate, timeout = 12000) {
     );
     const listing = await service.list(s.id, "/中文目录");
     assert.equal(listing.entries.length, 2);
+    const localListing = await service.list(null, folder);
+    const localFile = localListing.entries.find((e) => e.name === "文件.txt");
+    assert.equal(
+      localFile.mtime,
+      (await fs.stat(path.join(folder, "文件.txt"))).mtimeMs,
+    );
+    const remoteMtime = 1700000000;
+    await fs.utimes(
+      path.join(remote, "中文目录", "文件.txt"),
+      remoteMtime,
+      remoteMtime,
+    );
+    const timedListing = await service.list(s.id, "/中文目录");
+    assert.equal(
+      timedListing.entries.find((e) => e.name === "文件.txt").mtime,
+      remoteMtime * 1000,
+    );
+    console.log(
+      "✓ Local and SFTP modification timestamps use the same millisecond format",
+    );
+
     const download = path.join(root, "downloads");
     await fs.mkdir(download);
     completed = waitEvent(
@@ -140,6 +161,94 @@ function waitEvent(service, predicate, timeout = 12000) {
       content,
     );
     console.log("✓ Recursive download and content integrity");
+    const preview = await service.previews.read(
+      "remote-text",
+      s.id,
+      "/中文目录/文件.txt",
+    );
+    assert.equal(preview.text, "你好 SSH");
+    assert.equal(preview.truncated, false);
+    const localPreview = await service.previews.read(
+      "local-text",
+      null,
+      path.join(folder, "文件.txt"),
+    );
+    assert.equal(localPreview.text, preview.text);
+    await fs.writeFile(
+      path.join(remote, "large.log"),
+      "x".repeat(1024 * 1024 + 20),
+    );
+    const largePreview = await service.previews.read(
+      "remote-large",
+      s.id,
+      "/large.log",
+    );
+    assert(largePreview.truncated);
+    assert.equal(largePreview.bytesRead, 1024 * 1024);
+    await assert.rejects(
+      service.previews.read("remote-binary", s.id, "/中文目录/large.bin"),
+      /UTF-8/,
+    );
+    await assert.rejects(
+      service.previews.read("remote-missing", s.id, "/absent.txt"),
+    );
+    await assert.rejects(
+      service.previews.read("remote-directory", s.id, "/中文目录"),
+      /普通文件/,
+    );
+    await fs.symlink("中文目录/文件.txt", path.join(remote, "preview-link"));
+    assert.equal(
+      (await service.previews.read("remote-link", s.id, "/preview-link")).text,
+      "你好 SSH",
+    );
+    const previewPending = service.previews.read(
+      "remote-cancel",
+      s.id,
+      "/large.log",
+    );
+    const cancelledPreview = assert.rejects(previewPending, /取消/);
+    service.previews.cancel("remote-cancel");
+    await cancelledPreview;
+    assert.equal(service.previews.requests.size, 0);
+    console.log(
+      "✓ Local and remote previews: UTF-8, symlink files, large-file cap, unsupported files and cancellation",
+    );
+
+    await fs.symlink("中文目录", path.join(local, "linked-folder"));
+    await fs.symlink("loop", path.join(local, "loop"));
+    const localLinks = await service.list(null, local);
+    assert(
+      localLinks.entries.find((e) => e.name === "linked-folder").directory,
+    );
+    assert(localLinks.entries.find((e) => e.name === "loop").linkError);
+    assert(
+      (await service.list(null, folder)).entries.find((e) => e.name === "link")
+        .linkError,
+    );
+    assert(
+      (
+        await service.list(null, path.join(local, "linked-folder"))
+      ).entries.some((e) => e.name === "文件.txt"),
+    );
+    await fs.symlink("中文目录", path.join(remote, "plugins"));
+    await fs.symlink("中文目录/文件.txt", path.join(remote, "file-link"));
+    await fs.symlink("missing", path.join(remote, "broken-link"));
+    const remoteLinks = await service.list(s.id, "/");
+    const directoryLink = remoteLinks.entries.find((e) => e.name === "plugins");
+    assert(directoryLink.symlink && directoryLink.directory);
+    const fileLink = remoteLinks.entries.find((e) => e.name === "file-link");
+    assert(fileLink.symlink && !fileLink.directory);
+    assert.equal(fileLink.size, Buffer.byteLength("你好 SSH"));
+    assert(remoteLinks.entries.find((e) => e.name === "broken-link").linkError);
+    assert(
+      (await service.list(s.id, "/plugins")).entries.some(
+        (e) => e.name === "文件.txt",
+      ),
+    );
+    console.log(
+      "✓ Local and SFTP symlink directories are navigable; file links, broken links and cycles are classified",
+    );
+
     // A server without the OpenSSH atomic rename extension must preserve existing targets.
     completed = waitEvent(
       service,
@@ -206,6 +315,19 @@ function waitEvent(service, predicate, timeout = 12000) {
     }
     assert.equal(service.sessions.size, 4);
     console.log("✓ Four independent simultaneous sessions");
+    const disconnectedPreview = service.previews.read(
+      "disconnect-preview",
+      others[0].id,
+      "/large.log",
+    );
+    const connectionFailure = assert.rejects(disconnectedPreview, /连接已断开/);
+    service.close(others[0].id);
+    await connectionFailure;
+    assert.equal(service.previews.requests.size, 0);
+    console.log(
+      "✓ Closing a session cancels its pending preview without affecting other sessions",
+    );
+
     const isolated = waitEvent(
       service,
       (e) =>

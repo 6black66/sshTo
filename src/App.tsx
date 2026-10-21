@@ -25,6 +25,7 @@ import {
   Trash2,
 } from "lucide-react";
 import Terminal, { disposeTerminal } from "./Terminal";
+import FilePreview, { type PreviewSource } from "./FilePreview";
 import {
   api,
   type Device,
@@ -49,6 +50,13 @@ const size = (n: number) =>
     : n < 1048576
       ? `${(n / 1024).toFixed(1)} KB`
       : `${(n / 1048576).toFixed(1)} MB`;
+const fileTime = (timestamp: number | null) => {
+  if (timestamp === null || !Number.isFinite(timestamp)) return "—";
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "—";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+};
 const join = (dir: string, name: string) => `${dir.replace(/\/$/, "")}/${name}`;
 const label = (status: string) =>
   ({
@@ -62,6 +70,8 @@ const label = (status: string) =>
     cancelled: "已取消",
   })[status] || status;
 export default function App() {
+  const [preview, setPreview] = useState<PreviewSource | null>(null);
+  const previewTrigger = useRef<HTMLElement | null>(null);
   const [devices, setDevices] = useState<Device[]>([]),
     [sessions, setSessions] = useState<Session[]>([]),
     [active, setActive] = useState(""),
@@ -331,6 +341,19 @@ export default function App() {
         : [name],
     );
   };
+  const openFile = (
+    side: "local" | "remote",
+    listing: Listing,
+    entry: Entry,
+  ) => {
+    previewTrigger.current = document.activeElement as HTMLElement;
+    setPreview({
+      sessionId: side === "local" ? null : active,
+      path: join(listing.path, entry.name),
+      source:
+        side === "local" ? "本机" : current?.route.at(-1)?.name || "远程设备",
+    });
+  };
   const renderBrowser = (side: "local" | "remote") => {
     const listing = side === "local" ? local : remote,
       selection = side === "local" ? localSelection : remoteSelection,
@@ -396,7 +419,10 @@ export default function App() {
         </div>
         <div className="file-head">
           <span>名称</span>
-          <span>大小</span>
+          <span className="file-size">大小</span>
+          <span className="file-mtime" title="按本机时区显示">
+            修改时间
+          </span>
         </div>
         <div className="entries">
           {!ready ? (
@@ -422,13 +448,27 @@ export default function App() {
                   aria-label={entry.name}
                   className={`entry ${selection.includes(entry.name) ? "selected" : ""}`}
                   onClick={(e) => selected(side, entry.name, e)}
+                  title={
+                    entry.linkError ||
+                    (entry.symlink
+                      ? entry.directory
+                        ? "软链接目录，双击进入"
+                        : "软链接文件"
+                      : undefined)
+                  }
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && entry.directory)
-                      void refresh(join(listing.path, entry.name));
+                    if (e.key === "Enter") {
+                      if (entry.linkError) setFileError(entry.linkError);
+                      else if (entry.directory)
+                        void refresh(join(listing.path, entry.name));
+                      else openFile(side, listing, entry);
+                    }
                   }}
                   onDoubleClick={() => {
-                    if (entry.directory && !entry.symlink)
+                    if (entry.linkError) setFileError(entry.linkError);
+                    else if (entry.directory)
                       void refresh(join(listing.path, entry.name));
+                    else openFile(side, listing, entry);
                   }}
                   draggable={!entry.symlink}
                   onDragStart={(e) => {
@@ -454,7 +494,12 @@ export default function App() {
                     {entry.name}
                     {entry.symlink ? " ↗" : ""}
                   </span>
-                  <small>{entry.directory ? "—" : size(entry.size)}</small>
+                  <small className="file-size">
+                    {entry.directory ? "—" : size(entry.size)}
+                  </small>
+                  <small className="file-mtime" title="按本机时区显示">
+                    {fileTime(entry.mtime)}
+                  </small>
                 </div>
               ))
           )}
@@ -968,6 +1013,15 @@ export default function App() {
             <X size={16} />
           </button>
         </div>
+      )}
+      {preview && (
+        <FilePreview
+          file={preview}
+          onClose={() => {
+            setPreview(null);
+            requestAnimationFrame(() => previewTrigger.current?.focus());
+          }}
+        />
       )}
       {editing && (
         <div className="overlay">

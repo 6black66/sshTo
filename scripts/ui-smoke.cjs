@@ -13,7 +13,7 @@ const { fixture } = require("./ssh-fixture.cjs");
     await fs.mkdir(remote);
     await fs.mkdir(local);
     await fs.writeFile(path.join(local, "拖拽测试.txt"), "Hello from sshTo");
-    server = await fixture(remote);
+    server = await fixture(remote, { readDelay: 400 });
     app = await electron.launch({
       executablePath: process.env.SSHTO_EXECUTABLE,
       args: [
@@ -95,6 +95,41 @@ const { fixture } = require("./ssh-fixture.cjs");
     console.log(
       "✓ File panel defaults to 50%, resizes both ways, respects minimums and resets on double click",
     );
+    await fs.mkdir(path.join(remote, "plugin-target"));
+    await fs.writeFile(
+      path.join(remote, "plugin-target", "inside.txt"),
+      "linked content",
+    );
+    await fs.symlink("plugin-target", path.join(remote, "plugins"));
+    await fs.symlink("missing", path.join(remote, "broken-link"));
+    const remoteBrowser = page.locator(".browser").nth(1);
+    await remoteBrowser.getByTitle("刷新目录", { exact: true }).click();
+    const pluginLink = remoteBrowser.getByRole("button", {
+      name: "plugins",
+      exact: true,
+    });
+    await pluginLink.dblclick();
+    await remoteBrowser
+      .getByRole("button", { name: "inside.txt", exact: true })
+      .waitFor();
+    await remoteBrowser.getByTitle("上级目录", { exact: true }).click();
+    await pluginLink.focus();
+    await page.keyboard.press("Enter");
+    await remoteBrowser
+      .getByRole("button", { name: "inside.txt", exact: true })
+      .waitFor();
+    await remoteBrowser.getByTitle("上级目录", { exact: true }).click();
+    await remoteBrowser
+      .getByRole("button", { name: "broken-link", exact: true })
+      .dblclick();
+    await page
+      .locator(".file-error")
+      .filter({ hasText: "软链接目标不存在" })
+      .waitFor();
+    await page.getByTitle("关闭错误", { exact: true }).click();
+    console.log(
+      "✓ Remote symlink folders open by double-click and Enter; broken links show a clear error",
+    );
     // Open four independent tabs, then verify split layout and resizing.
     for (let i = 0; i < 3; i++) {
       await page.getByTitle("连接设备", { exact: true }).click();
@@ -124,9 +159,16 @@ const { fixture } = require("./ssh-fixture.cjs");
     await page
       .locator(".browser")
       .nth(1)
-      .locator(".file-empty")
-      .filter({ hasText: "此目录为空" })
+      .getByRole("button", { name: "plugins", exact: true })
       .waitFor();
+    assert.equal(await page.getByText("修改时间", { exact: true }).count(), 2);
+    const timestamp = await page
+      .locator(".browser")
+      .first()
+      .getByRole("button", { name: "拖拽测试.txt", exact: true })
+      .locator(".file-mtime")
+      .innerText();
+    assert.match(timestamp, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     const dt = await page.evaluateHandle(() => new DataTransfer());
     await page
       .locator(".browser")
@@ -151,6 +193,151 @@ const { fixture } = require("./ssh-fixture.cjs");
       .nth(1)
       .getByRole("button", { name: "拖拽测试.txt", exact: true })
       .waitFor();
+    const remoteTimestamp = await page
+      .locator(".browser")
+      .nth(1)
+      .getByRole("button", { name: "拖拽测试.txt", exact: true })
+      .locator(".file-mtime")
+      .innerText();
+    assert.match(remoteTimestamp, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    console.log(
+      "✓ Local and remote file rows display modification date and time",
+    );
+
+    const previewText =
+      "<config>你好\n  <script>window.previewInjected=true</script>\n</config>";
+    await fs.writeFile(path.join(local, "note.xml"), previewText);
+    await fs.writeFile(
+      path.join(local, "large.log"),
+      "x".repeat(1024 * 1024 + 10),
+    );
+    await fs.writeFile(path.join(local, "empty.txt"), "");
+    await fs.writeFile(
+      path.join(local, "config.json"),
+      JSON.stringify({ enabled: true, port: 22, name: "中文" }),
+    );
+    await fs.writeFile(
+      path.join(local, "binary.bin"),
+      Buffer.from([0, 1, 2, 255]),
+    );
+    await fs.writeFile(path.join(remote, "slow.txt"), "old remote result");
+    await fs.symlink("拖拽测试.txt", path.join(remote, "file-link"));
+    const localBrowser = page.locator(".browser").first();
+    await localBrowser.getByTitle("刷新目录", { exact: true }).click();
+    await remoteBrowser.getByTitle("刷新目录", { exact: true }).click();
+    const note = localBrowser.getByRole("button", {
+      name: "note.xml",
+      exact: true,
+    });
+    await note.dblclick();
+    const previewDialog = page.getByRole("dialog");
+    await previewDialog.getByLabel("文件内容").waitFor();
+    await previewDialog.locator(".hljs-name").first().waitFor();
+    assert.notEqual(
+      await previewDialog
+        .locator(".hljs-name")
+        .first()
+        .evaluate((el) => getComputedStyle(el).color),
+      await previewDialog
+        .getByLabel("文件内容")
+        .evaluate((el) => getComputedStyle(el).color),
+    );
+    assert.equal(
+      await previewDialog.getByLabel("文件内容").textContent(),
+      previewText,
+    );
+    assert.equal(
+      await previewDialog
+        .locator("input,textarea,[contenteditable=true],script")
+        .count(),
+      0,
+    );
+    await previewDialog
+      .getByRole("button", { name: "复制全部", exact: true })
+      .click();
+    await previewDialog
+      .getByRole("button", { name: "已复制", exact: true })
+      .waitFor();
+    assert.equal(
+      await app.evaluate(({ clipboard }) => clipboard.readText()),
+      previewText,
+    );
+    await fs.mkdir("test-results", { recursive: true });
+    await page.screenshot({ path: "test-results/preview.png" });
+    await page.keyboard.press("Escape");
+    await previewDialog.waitFor({ state: "detached" });
+    await remoteBrowser
+      .getByRole("button", { name: "file-link", exact: true })
+      .focus();
+    await page.keyboard.press("Enter");
+    await previewDialog.getByLabel("文件内容").waitFor();
+    assert.equal(
+      await previewDialog.getByLabel("文件内容").textContent(),
+      "Hello from sshTo",
+    );
+    await previewDialog.getByTitle("关闭预览", { exact: true }).click();
+    await remoteBrowser
+      .getByRole("button", { name: "slow.txt", exact: true })
+      .dblclick();
+    await previewDialog.getByText("正在读取文件…", { exact: true }).waitFor();
+    await previewDialog.getByTitle("关闭预览", { exact: true }).click();
+    await note.focus();
+    await page.keyboard.press("Enter");
+    await previewDialog.getByLabel("文件内容").waitFor();
+    await page.waitForTimeout(1000);
+    assert.equal(
+      await previewDialog.getByLabel("文件内容").textContent(),
+      previewText,
+    );
+    await previewDialog.getByTitle("关闭预览", { exact: true }).click();
+    await localBrowser
+      .getByRole("button", { name: "config.json", exact: true })
+      .dblclick();
+    await previewDialog.locator(".hljs-string").first().waitFor();
+    assert.notEqual(
+      await previewDialog
+        .locator(".hljs-string")
+        .first()
+        .evaluate((el) => getComputedStyle(el).color),
+      await previewDialog
+        .locator(".hljs-number")
+        .first()
+        .evaluate((el) => getComputedStyle(el).color),
+    );
+    await previewDialog.getByTitle("关闭预览", { exact: true }).click();
+    await localBrowser
+      .getByRole("button", { name: "large.log", exact: true })
+      .dblclick();
+    await previewDialog.locator(".preview-notice").waitFor();
+    assert.equal(
+      (await previewDialog.getByLabel("文件内容").textContent()).length,
+      1024 * 1024,
+    );
+    await previewDialog
+      .getByText("内容较大，使用纯文本显示", { exact: true })
+      .waitFor();
+    await previewDialog.getByTitle("关闭预览", { exact: true }).click();
+    await localBrowser
+      .getByRole("button", { name: "empty.txt", exact: true })
+      .dblclick();
+    await previewDialog.getByText("此文件为空", { exact: true }).waitFor();
+    await previewDialog.getByTitle("关闭预览", { exact: true }).click();
+    await localBrowser
+      .getByRole("button", { name: "binary.bin", exact: true })
+      .dblclick();
+    await previewDialog
+      .getByRole("alert")
+      .filter({ hasText: "UTF-8" })
+      .waitFor();
+    assert(
+      await previewDialog
+        .getByRole("button", { name: "复制全部", exact: true })
+        .isDisabled(),
+    );
+    await previewDialog.getByTitle("关闭预览", { exact: true }).click();
+    console.log(
+      "✓ Read-only preview: local XML, remote file link, copy, Escape, empty and large files, binary rejection and stale-response isolation",
+    );
     await page.locator(".terminal-pane:visible .xterm-helper-textarea").focus();
     await page.keyboard.type("echo hello");
     await page.waitForTimeout(300);

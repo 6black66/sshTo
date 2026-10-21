@@ -1,4 +1,5 @@
 const { Client } = require("ssh2");
+const { PreviewReader } = require("./preview.cjs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -131,6 +132,11 @@ const call = (obj, method, ...args) =>
   new Promise((resolve, reject) =>
     obj[method](...args, (e, result) => (e ? reject(e) : resolve(result))),
   );
+function linkFailure(error) {
+  if (error.code === "ENOENT" || error.code === 2) return "软链接目标不存在";
+  if (error.code === "ELOOP") return "软链接循环或层级过深";
+  return "无法访问软链接目标：" + error.message;
+}
 class SSHService extends EventEmitter {
   constructor(store, approve) {
     super();
@@ -139,6 +145,7 @@ class SSHService extends EventEmitter {
     this.sessions = new Map();
     this.tasks = new Map();
     this.jobs = new Map();
+    this.previews = new PreviewReader((id) => this.sftp(id));
   }
   event(type, data) {
     this.emit("event", { type, ...data });
@@ -305,6 +312,7 @@ class SSHService extends EventEmitter {
     this.close(s.id, false);
   }
   close(id, notify = true) {
+    this.previews.cancelSession(id);
     const s = this.sessions.get(id);
     if (!s) return;
     s.closed = true;
@@ -347,26 +355,59 @@ class SSHService extends EventEmitter {
       const items = await call(ftp, "readdir", resolved);
       return {
         path: resolved,
-        entries: items
-          .filter((x) => ![".", ".."].includes(x.filename))
-          .map((x) => ({
-            name: x.filename,
-            directory: x.attrs.isDirectory(),
-            symlink: x.attrs.isSymbolicLink(),
-            size: x.attrs.size,
-          })),
+        entries: await Promise.all(
+          items
+            .filter((x) => ![".", ".."].includes(x.filename))
+            .map(async (x) => {
+              let attrs = x.attrs,
+                linkError;
+              const symlink = attrs.isSymbolicLink();
+              if (symlink) {
+                try {
+                  attrs = await call(
+                    ftp,
+                    "stat",
+                    path.posix.join(resolved, x.filename),
+                  );
+                } catch (e) {
+                  linkError = linkFailure(e);
+                }
+              }
+              return {
+                name: x.filename,
+                directory: attrs.isDirectory(),
+                symlink,
+                size: attrs.size,
+                mtime:
+                  typeof attrs.mtime === "number" ? attrs.mtime * 1000 : null,
+                linkError,
+              };
+            }),
+        ),
       };
     }
     const resolved = path.resolve(dir || require("node:os").homedir());
     const items = await fs.readdir(resolved, { withFileTypes: true });
     const entries = await Promise.all(
       items.map(async (x) => {
-        const st = await fs.lstat(path.join(resolved, x.name));
+        const fullPath = path.join(resolved, x.name);
+        const st = await fs.lstat(fullPath);
+        let attrs = st,
+          linkError;
+        if (st.isSymbolicLink()) {
+          try {
+            attrs = await fs.stat(fullPath);
+          } catch (e) {
+            linkError = linkFailure(e);
+          }
+        }
         return {
           name: x.name,
-          directory: st.isDirectory(),
+          directory: attrs.isDirectory(),
           symlink: st.isSymbolicLink(),
-          size: st.size,
+          size: attrs.size,
+          mtime: attrs.mtimeMs,
+          linkError,
         };
       }),
     );

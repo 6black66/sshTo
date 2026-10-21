@@ -83,6 +83,9 @@ app.whenReady().then(async () => {
       service.resize(id, c, r);
     },
     "files:list": (id, dir) => service.list(id, dir),
+    "files:preview": (requestId, id, filePath) =>
+      service.previews.read(requestId, id, filePath),
+    "files:preview-cancel": (requestId) => service.previews.cancel(requestId),
     "files:transfer": (id, d, s, dest) => service.transfer(id, d, s, dest),
     "files:cancel": (id) => service.cancel(id),
     "dialog:key": async () => {
@@ -127,12 +130,14 @@ app.whenReady().then(async () => {
         .then(async (r) => {
           if (r.response === 1) {
             quitting = true;
+            service.previews.cancelAll();
             for (const id of service.sessions.keys()) service.close(id);
             await Promise.allSettled([...service.jobs.values()]);
             win.close();
           }
         });
     } else {
+      service.previews.cancelAll();
       for (const id of service.sessions.keys()) service.close(id);
     }
   });

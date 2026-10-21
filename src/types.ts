@@ -24,7 +24,9 @@ export interface Entry {
   name: string;
   directory: boolean;
   symlink: boolean;
+  linkError?: string;
   size: number;
+  mtime: number | null;
 }
 export interface Listing {
   path: string;
@@ -63,3 +65,9 @@ declare global {
 }
 export const api = <T = unknown>(name: string, ...args: unknown[]) =>
   window.sshTo.call<T>(name, ...args);
+
+export interface FilePreview {
+  text: string;
+  truncated: boolean;
+  bytesRead: number;
+}

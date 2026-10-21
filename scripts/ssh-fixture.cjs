@@ -10,7 +10,7 @@ const fsp = fs.promises;
 const path = require("node:path");
 const net = require("node:net");
 const crypto = require("node:crypto");
-function attachSftp(s, root) {
+function attachSftp(s, root, readDelay = 0) {
   let sequence = 0;
   const handles = new Map();
   const resolve = (p) => {
@@ -98,6 +98,8 @@ function attachSftp(s, root) {
   );
   s.on("READ", (id, h, offset, length) =>
     run(id, async () => {
+      if (readDelay)
+        await new Promise((resolve) => setTimeout(resolve, readDelay));
       const buffer = Buffer.alloc(length);
       const { bytesRead } = await get(h).fd.read(buffer, 0, length, offset);
       if (bytesRead) s.data(id, buffer.subarray(0, bytesRead));
@@ -155,6 +157,7 @@ async function fixture(
     publicKey,
     noSftp = false,
     noForward = false,
+    readDelay = 0,
   } = {},
 ) {
   const { privateKey } = crypto.generateKeyPairSync("rsa", {
@@ -203,7 +206,7 @@ async function fixture(
         });
         session.on("sftp", (accept, reject) => {
           if (noSftp) return reject();
-          attachSftp(accept(), root);
+          attachSftp(accept(), root, readDelay);
         });
       });
     });

@@ -9,6 +9,8 @@ const channels = new Set([
   "sessions:input",
   "sessions:resize",
   "files:list",
+  "files:preview",
+  "files:preview-cancel",
   "files:transfer",
   "files:cancel",
   "dialog:key",
