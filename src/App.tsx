@@ -25,6 +25,7 @@ import {
   Trash2,
 } from "lucide-react";
 import Terminal, { disposeTerminal } from "./Terminal";
+import { installClipboardSupport } from "./clipboard";
 import FilePreview, { type PreviewSource } from "./FilePreview";
 import {
   api,
@@ -148,6 +149,7 @@ export default function App() {
   };
   const notify = (e: unknown) =>
     setError(e instanceof Error ? e.message : String(e));
+  useEffect(() => installClipboardSupport(notify), []);
   const refreshDevices = () =>
     api<Device[]>("devices:list").then(setDevices).catch(notify);
   useEffect(() => {
@@ -155,6 +157,7 @@ export default function App() {
     void api<boolean>("vault:available").then(setVault).catch(notify);
     void api<Listing>("files:list", null, "").then(setLocal).catch(notify);
     return window.sshTo.subscribe((e) => {
+      if (e.type === "clipboard-error") setError(e.message || "剪贴板操作失败");
       if (e.type === "status")
         setSessions((all) =>
           all.map((s) =>
@@ -759,7 +762,11 @@ export default function App() {
                           {s.message}
                         </div>
                       )}
-                      <Terminal id={s.id} active={active === s.id && visible} />
+                      <Terminal
+                        id={s.id}
+                        active={active === s.id && visible}
+                        onError={notify}
+                      />
                     </section>
                     {visible && next && split !== "none" && (
                       <div

@@ -4,9 +4,12 @@ const {
   ipcMain,
   dialog,
   safeStorage,
+  clipboard,
+  Menu,
 } = require("electron");
 const path = require("node:path");
 const { Store, SSHService } = require("./backend.cjs");
+const { createClipboardHandlers } = require("./clipboard.cjs");
 let win, store, service;
 const available = () =>
   safeStorage.isEncryptionAvailable() &&
@@ -59,13 +62,21 @@ app.whenReady().then(async () => {
         : ["跳过", "覆盖"],
       defaultId: 0,
       cancelId: 0,
+      checkboxLabel: host ? undefined : "对本次传输的所有同名文件执行此操作",
+      checkboxChecked: false,
     });
-    return result.response === 1;
+    return host
+      ? result.response === 1
+      : {
+          approved: result.response === 1,
+          applyToAll: result.checkboxChecked === true,
+        };
   });
   service.on("event", (e) => {
     if (!win.isDestroyed()) win.webContents.send("ssh:event", e);
   });
   const handlers = {
+    ...createClipboardHandlers(win, service, { clipboard, Menu }),
     "devices:list": () => store.list(),
     "devices:save": (d, s, r) => store.save(d, s, r),
     "devices:remove": (id) => store.remove(id),

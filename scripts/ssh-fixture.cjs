@@ -158,6 +158,7 @@ async function fixture(
     noSftp = false,
     noForward = false,
     readDelay = 0,
+    onInput,
   } = {},
 ) {
   const { privateKey } = crypto.generateKeyPairSync("rsa", {
@@ -202,7 +203,10 @@ async function fixture(
         session.on("shell", (accept) => {
           const stream = accept();
           stream.write("fixture ready\r\n");
-          stream.on("data", (b) => stream.write(b));
+          stream.on("data", (b) => {
+            onInput?.(b);
+            stream.write(b);
+          });
         });
         session.on("sftp", (accept, reject) => {
           if (noSftp) return reject();

@@ -1,4 +1,4 @@
-const { _electron: electron } = require("@playwright/test");
+const { _electron: electron, expect } = require("@playwright/test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -13,7 +13,11 @@ const { fixture } = require("./ssh-fixture.cjs");
     await fs.mkdir(remote);
     await fs.mkdir(local);
     await fs.writeFile(path.join(local, "拖拽测试.txt"), "Hello from sshTo");
-    server = await fixture(remote, { readDelay: 400 });
+    const terminalInput = [];
+    server = await fixture(remote, {
+      readDelay: 400,
+      onInput: (buffer) => terminalInput.push(Buffer.from(buffer)),
+    });
     app = await electron.launch({
       executablePath: process.env.SSHTO_EXECUTABLE,
       args: [
@@ -337,6 +341,236 @@ const { fixture } = require("./ssh-fixture.cjs");
     await previewDialog.getByTitle("关闭预览", { exact: true }).click();
     console.log(
       "✓ Read-only preview: local XML, remote file link, copy, Escape, empty and large files, binary rejection and stale-response isolation",
+    );
+
+    const conflictNames = ["overwrite-a.txt", "overwrite-b.txt"];
+    for (const name of conflictNames) {
+      await fs.writeFile(path.join(local, name), "local old");
+      await fs.writeFile(path.join(remote, name), "remote " + name);
+    }
+    await localBrowser.getByTitle("刷新目录", { exact: true }).click();
+    await remoteBrowser.getByTitle("刷新目录", { exact: true }).click();
+    let conflictRuns = 0;
+    const chooseAll = async (approved) => {
+      await app.evaluate(({ dialog }, approve) => {
+        globalThis.__sshtoConflictPrompts = [];
+        dialog.showMessageBox = async (_window, options) => {
+          globalThis.__sshtoConflictPrompts.push({
+            label: options.checkboxLabel,
+            checked: options.checkboxChecked,
+          });
+          return { response: approve ? 1 : 0, checkboxChecked: true };
+        };
+      }, approved);
+      await remoteBrowser
+        .getByRole("button", { name: conflictNames[0], exact: true })
+        .click();
+      await remoteBrowser
+        .getByRole("button", { name: conflictNames[1], exact: true })
+        .click({ modifiers: ["Control"] });
+      await page.getByRole("button", { name: "下载", exact: true }).click();
+      await page.waitForFunction(
+        (count) =>
+          Array.from(document.querySelectorAll(".task")).filter((el) =>
+            el.textContent.includes("overwrite-a.txt"),
+          ).length === count,
+        ++conflictRuns,
+      );
+
+      await page
+        .locator(".task")
+        .filter({ hasText: conflictNames[0] })
+        .first()
+        .locator(".task-status")
+        .filter({ hasText: "已完成" })
+        .waitFor();
+      const prompts = await app.evaluate(
+        () => globalThis.__sshtoConflictPrompts,
+      );
+      assert.equal(prompts.length, 1);
+      assert.equal(prompts[0].label, "对本次传输的所有同名文件执行此操作");
+      assert.equal(prompts[0].checked, false);
+      await page.getByRole("button", { name: "传输队列", exact: true }).click();
+    };
+    await chooseAll(true);
+    for (const name of conflictNames)
+      assert.equal(
+        await fs.readFile(path.join(local, name), "utf8"),
+        "remote " + name,
+      );
+    for (const name of conflictNames)
+      await fs.writeFile(path.join(remote, name), "new version");
+    await chooseAll(false);
+    for (const name of conflictNames)
+      assert.equal(
+        await fs.readFile(path.join(local, name), "utf8"),
+        "remote " + name,
+      );
+    console.log(
+      "✓ Conflict dialog checkbox applies overwrite-all or skip-all once per task and resets for the next task",
+    );
+
+    // Inspect real native Menu objects without blocking automation on an OS popup.
+    await app.evaluate(({ Menu }) => {
+      Menu.prototype.popup = function () {
+        globalThis.__sshtoContextMenu = this;
+      };
+    });
+    const clipboardText = () =>
+      app.evaluate(({ clipboard }) => clipboard.readText());
+    const setClipboard = (text) =>
+      app.evaluate(async ({ clipboard }, value) => {
+        await clipboard.writeText(value);
+      }, text);
+    const menuItems = () =>
+      app.evaluate(() =>
+        globalThis.__sshtoContextMenu?.items.map((item) => ({
+          label: item.label,
+          enabled: item.enabled,
+        })),
+      );
+    const resetMenu = () =>
+      app.evaluate(() => {
+        globalThis.__sshtoContextMenu = null;
+      });
+    const menuClick = (label) =>
+      app.evaluate((_electron, name) => {
+        const item = globalThis.__sshtoContextMenu.items.find(
+          (item) => item.label === name,
+        );
+        if (!item?.enabled) throw Error("Menu item disabled");
+        item.click();
+      }, label);
+    const terminal = page.locator(".terminal-pane:visible > .terminal");
+    const terminalArea = terminal.locator(".xterm-helper-textarea");
+    await terminalArea.focus();
+    await setClipboard("clipboard-keep");
+    let inputStart = terminalInput.length;
+    await page.keyboard.press("Control+Shift+C");
+    await page.waitForTimeout(100);
+    assert.equal(await clipboardText(), "clipboard-keep");
+    assert.equal(terminalInput.length, inputStart);
+    await setClipboard("SHORTCUT_PASTE_中文");
+    await page.keyboard.press("Control+Shift+V");
+    await expect
+      .poll(() => Buffer.concat(terminalInput.slice(inputStart)).toString())
+      .toBe("SHORTCUT_PASTE_中文");
+    await page.waitForTimeout(100);
+    assert.equal(
+      Buffer.concat(terminalInput.slice(inputStart)).toString(),
+      "SHORTCUT_PASTE_中文",
+    );
+    inputStart = terminalInput.length;
+    await page.keyboard.press("Control+C");
+    await expect
+      .poll(() => Buffer.concat(terminalInput.slice(inputStart)).toString())
+      .toBe("\x03");
+    const screen = await terminal.locator(".xterm-screen").boundingBox();
+    await page.mouse.move(screen.x + 1, screen.y + 8);
+    await page.mouse.down();
+    await page.mouse.move(screen.x + screen.width - 2, screen.y + 8, {
+      steps: 8,
+    });
+    await page.mouse.up();
+    await page.keyboard.press("Control+Shift+C");
+    await expect
+      .poll(async () => String(await clipboardText()).trim())
+      .toBe("fixture ready");
+    inputStart = terminalInput.length;
+    await resetMenu();
+    await terminal.click({ button: "right", position: { x: 30, y: 20 } });
+    await expect.poll(menuItems).toEqual([
+      { label: "复制", enabled: true },
+      { label: "粘贴", enabled: true },
+    ]);
+    await setClipboard("before-menu-copy");
+    await menuClick("复制");
+    await expect
+      .poll(async () => String(await clipboardText()).trim())
+      .toBe("fixture ready");
+    await setClipboard("CONTEXT_PASTE_中文");
+    await menuClick("粘贴");
+    await expect
+      .poll(() => Buffer.concat(terminalInput.slice(inputStart)).toString())
+      .toBe("CONTEXT_PASTE_中文");
+    await page.waitForTimeout(100);
+    assert.equal(
+      Buffer.concat(terminalInput.slice(inputStart)).toString(),
+      "CONTEXT_PASTE_中文",
+    );
+    // Standard text controls retain native editing and gain Ctrl+Shift shortcuts.
+    await page.getByTitle("编辑 开发服务器", { exact: true }).click();
+    const hostInput = page.getByLabel("主机 / IP 地址");
+    await hostInput.fill("copy-from-input");
+    await hostInput.selectText();
+    await page.keyboard.press("Control+Shift+C");
+    await expect.poll(clipboardText).toBe("copy-from-input");
+    await setClipboard("paste-shortcut.example");
+    await hostInput.fill("");
+    await page.keyboard.press("Control+Shift+V");
+    await expect
+      .poll(() => hostInput.inputValue())
+      .toBe("paste-shortcut.example");
+    await hostInput.selectText();
+    await resetMenu();
+    await hostInput.click({ button: "right", position: { x: 30, y: 15 } });
+    await expect.poll(menuItems).toEqual([
+      { label: "复制", enabled: true },
+      { label: "粘贴", enabled: true },
+    ]);
+    await setClipboard("before-input-copy");
+    await menuClick("复制");
+    await expect.poll(clipboardText).toBe("paste-shortcut.example");
+    await hostInput.selectText();
+    await setClipboard("paste-context.example");
+    await menuClick("粘贴");
+    await expect
+      .poll(() => hostInput.inputValue())
+      .toBe("paste-context.example");
+    const passwordInput = page.getByLabel("登录密码", { exact: true });
+    await passwordInput.fill("password-test");
+    await passwordInput.selectText();
+    await resetMenu();
+    await passwordInput.click({ button: "right", position: { x: 30, y: 15 } });
+    await expect.poll(menuItems).toEqual([
+      { label: "复制", enabled: false },
+      { label: "粘贴", enabled: true },
+    ]);
+    await page.getByRole("button", { name: "取消", exact: true }).click();
+    // Selected highlighted text can be copied, but the read-only preview cannot receive paste.
+    await note.dblclick();
+    await previewDialog.getByLabel("文件内容").waitFor();
+    const selectPreview = () =>
+      previewDialog.getByLabel("文件内容").evaluate((el) => {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      });
+    await selectPreview();
+    await page.keyboard.press("Control+Shift+C");
+    await expect.poll(clipboardText).toBe(previewText);
+    await selectPreview();
+    await resetMenu();
+    await previewDialog
+      .getByLabel("文件内容")
+      .click({ button: "right", position: { x: 30, y: 15 } });
+    await expect.poll(menuItems).toEqual([
+      { label: "复制", enabled: true },
+      { label: "粘贴", enabled: false },
+    ]);
+    await setClipboard("before-preview-copy");
+    await menuClick("复制");
+    await expect.poll(clipboardText).toBe(previewText);
+    await page.keyboard.press("Control+Shift+V");
+    assert.equal(
+      await previewDialog.getByLabel("文件内容").textContent(),
+      previewText,
+    );
+    await previewDialog.getByTitle("关闭预览", { exact: true }).click();
+    console.log(
+      "✓ Clipboard shortcuts and context menus: terminal copy/paste, no duplicate input, Ctrl+C preserved, editable fields and read-only previews",
     );
     await page.locator(".terminal-pane:visible .xterm-helper-textarea").focus();
     await page.keyboard.type("echo hello");

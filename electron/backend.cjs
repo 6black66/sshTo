@@ -502,6 +502,8 @@ class SSHService extends EventEmitter {
         if (!st.isDirectory()) throw e;
       }
     }
+    // This choice belongs only to this run; concurrent jobs and retries prompt independently.
+    let overwriteDecision;
     for (const f of files) {
       check();
       let exists = false;
@@ -512,16 +514,31 @@ class SSHService extends EventEmitter {
       } catch (e) {
         if (remote ? e.code !== "ENOENT" : e.code !== 2) throw e;
       }
-      if (
-        exists &&
-        !(await this.approve({
-          kind: "overwrite",
-          path: f.dst,
-          sessionId: t.sessionId,
-        }))
-      ) {
-        t.skipped++;
-        continue;
+      if (exists) {
+        let approved = overwriteDecision;
+        if (approved === undefined) {
+          const decision = await this.approve({
+            kind: "overwrite",
+            path: f.dst,
+            sessionId: t.sessionId,
+            taskId: t.id,
+          });
+          check();
+          approved =
+            typeof decision === "boolean"
+              ? decision
+              : decision?.approved === true;
+          if (
+            decision &&
+            typeof decision === "object" &&
+            decision.applyToAll === true
+          )
+            overwriteDecision = approved;
+        }
+        if (!approved) {
+          t.skipped++;
+          continue;
+        }
       }
       check();
       const tmp = f.dst + ".sshto-" + t.id + ".part";
@@ -584,6 +601,7 @@ class SSHService extends EventEmitter {
         t.streams = undefined;
       }
     }
+    check();
     t.status = "done";
     t.message = t.skipped ? `已完成，跳过 ${t.skipped} 项` : "已完成";
     this.event("transfer", { task: { ...t } });

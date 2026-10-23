@@ -14,6 +14,10 @@ const channels = new Set([
   "files:transfer",
   "files:cancel",
   "dialog:key",
+  "clipboard:read",
+  "clipboard:write",
+  "clipboard:edit",
+  "clipboard:menu",
 ]);
 contextBridge.exposeInMainWorld("sshTo", {
   call: async (name, ...args) => {
