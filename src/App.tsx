@@ -23,6 +23,10 @@ import {
   ShieldCheck,
   Monitor,
   Trash2,
+  Copy,
+  Scissors,
+  Pencil,
+  Info,
 } from "lucide-react";
 import Terminal, { disposeTerminal } from "./Terminal";
 import { installClipboardSupport } from "./clipboard";
@@ -34,6 +38,7 @@ import {
   type Task,
   type Listing,
   type Entry,
+  type FileStat,
 } from "./types";
 const blank = (): Device => ({
   id: "",
@@ -70,9 +75,64 @@ const label = (status: string) =>
     done: "已完成",
     cancelled: "已取消",
   })[status] || status;
+const perms = (mode: number) => {
+  if (!Number.isFinite(mode)) return "—";
+  const bit = (n: number) =>
+    `${n & 4 ? "r" : "-"}${n & 2 ? "w" : "-"}${n & 1 ? "x" : "-"}`;
+  return `${bit((mode >> 6) & 7)}${bit((mode >> 3) & 7)}${bit(mode & 7)}`;
+};
+const uniqueName = (entries: Entry[], name: string) => {
+  if (!entries.some((e) => e.name === name)) return name;
+  const dot = name.lastIndexOf(".");
+  const base = dot > 0 ? name.slice(0, dot) : name,
+    ext = dot > 0 ? name.slice(dot) : "";
+  for (let i = 1; ; i++) {
+    const candidate = `${base} (${i})${ext}`;
+    if (!entries.some((e) => e.name === candidate)) return candidate;
+  }
+};
+type DialogAction = { label: string; value: string; danger?: boolean };
+type UndoOp = {
+  side: "local" | "remote";
+  sessionId: string;
+  kind: "rename" | "move" | "copy" | "create";
+  from?: string;
+  to?: string;
+  pairs?: { from: string; to: string }[];
+  paths?: string[];
+};
+type DialogState =
+  | {
+      kind: "text";
+      title: string;
+      detail?: string;
+      initial: string;
+      selectBase?: boolean;
+      side: "local" | "remote";
+      resolve: (v: string | null) => void;
+    }
+  | {
+      kind: "choice";
+      title: string;
+      detail: string;
+      actions: DialogAction[];
+      side: "local" | "remote";
+      resolve: (v: string) => void;
+    }
+  | {
+      kind: "stat";
+      title: string;
+      name: string;
+      path: string;
+      stat: FileStat;
+    };
 export default function App() {
   const [preview, setPreview] = useState<PreviewSource | null>(null);
   const previewTrigger = useRef<HTMLElement | null>(null);
+  const selectionAnchor = useRef<{
+    side: "local" | "remote";
+    name: string;
+  } | null>(null);
   const [devices, setDevices] = useState<Device[]>([]),
     [sessions, setSessions] = useState<Session[]>([]),
     [active, setActive] = useState(""),
@@ -98,8 +158,103 @@ export default function App() {
     [fileError, setFileError] = useState(""),
     [remoteLoading, setRemoteLoading] = useState(false),
     [showQueue, setShowQueue] = useState(false),
-    [busy, setBusy] = useState(false);
+    [busy, setBusy] = useState(false),
+    [fileClip, setFileClip] = useState<{
+      side: "local" | "remote";
+      op: "copy" | "move";
+      sessionId: string;
+      paths: string[];
+    } | null>(null),
+    [dialog, setDialog] = useState<DialogState | null>(null),
+    [undoStack, setUndoStack] = useState<UndoOp[]>([]);
+  const pushUndo = (op: UndoOp) => setUndoStack((s) => [...s.slice(-19), op]);
+  const dialogInputRef = useRef<HTMLInputElement | null>(null);
+  const undoBusy = useRef(false);
+  const entriesRef = useRef<
+    Partial<Record<"local" | "remote", HTMLDivElement | null>>
+  >({});
+  const focusEntries = (side: "local" | "remote") =>
+    requestAnimationFrame(() => entriesRef.current[side]?.focus());
+  // Modal dialogs without their own input (choice/stat) must trap focus:
+  // autofocus on open, Enter activates the last (primary) action only when no
+  // button is focused, Escape closes, Tab wraps inside. Without this, Enter
+  // leaks to the focused entry underneath and opens the file instead.
+  const modalKeyDown = (
+    e: React.KeyboardEvent<HTMLDivElement>,
+    onEnter: (() => void) | null,
+    onClose: () => void,
+  ) => {
+    if (e.key === "Enter" && onEnter) {
+      if ((document.activeElement as HTMLElement)?.tagName === "BUTTON") return;
+      e.preventDefault();
+      e.stopPropagation();
+      onEnter();
+      return;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+      return;
+    }
+    if (e.key === "Tab") {
+      const buttons = [
+        ...e.currentTarget.querySelectorAll<HTMLButtonElement>("button"),
+      ].filter((b) => !b.disabled);
+      if (!buttons.length) return;
+      const first = buttons[0],
+        last = buttons[buttons.length - 1];
+      if (
+        e.shiftKey &&
+        (document.activeElement === first ||
+          document.activeElement === e.currentTarget)
+      ) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+  };
+  const refocusIfLost = (side: "local" | "remote") =>
+    requestAnimationFrame(() => {
+      if (document.activeElement === document.body)
+        entriesRef.current[side]?.focus();
+    });
+  const askText = (
+    title: string,
+    initial: string,
+    detail?: string,
+    selectBase = false,
+    side: "local" | "remote" = "local",
+  ) =>
+    new Promise<string | null>((resolve) =>
+      setDialog({
+        kind: "text",
+        title,
+        detail,
+        initial,
+        selectBase,
+        side,
+        resolve,
+      }),
+    );
+  const askChoice = (
+    title: string,
+    detail: string,
+    actions: DialogAction[],
+    side: "local" | "remote" = "local",
+  ) =>
+    new Promise<string | null>((resolve) =>
+      setDialog({ kind: "choice", title, detail, actions, side, resolve }),
+    );
   const workspaceRef = useRef<HTMLDivElement>(null);
+  const modalRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (dialog?.kind === "choice" || dialog?.kind === "stat")
+      modalRef.current?.focus();
+  }, [dialog]);
   const fileDrag = useRef<{
     startY: number;
     ratio: number;
@@ -114,6 +269,11 @@ export default function App() {
   const current = sessions.find((s) => s.id === active);
   const activeRef = useRef(active);
   activeRef.current = active;
+  const remotePathMemo = useRef<Record<string, string>>({});
+  const localPathMemo = useRef<Record<string, string>>({});
+  const fileMenuRef = useRef<
+    (side: "local" | "remote", action: string) => void
+  >(() => {});
   const [weights, setWeights] = useState<Record<string, number>>({});
   const resizePanes = (
     e: React.PointerEvent<HTMLDivElement>,
@@ -155,9 +315,10 @@ export default function App() {
   useEffect(() => {
     void refreshDevices();
     void api<boolean>("vault:available").then(setVault).catch(notify);
-    void api<Listing>("files:list", null, "").then(setLocal).catch(notify);
     return window.sshTo.subscribe((e) => {
       if (e.type === "clipboard-error") setError(e.message || "剪贴板操作失败");
+      if (e.type === "file-menu" && e.side && e.action)
+        fileMenuRef.current(e.side, e.action);
       if (e.type === "status")
         setSessions((all) =>
           all.map((s) =>
@@ -178,8 +339,17 @@ export default function App() {
               : s,
           ),
         );
-      if (e.type === "transfer" && e.task)
+      if (e.type === "transfer" && e.task) {
         setTasks((all) => [...all.filter((t) => t.id !== e.task!.id), e.task!]);
+        if (e.task.status === "done" && e.task.undo)
+          pushUndo({
+            side: "remote",
+            sessionId: e.task.sessionId,
+            kind: e.task.undo.kind,
+            pairs: e.task.undo.pairs,
+            paths: e.task.undo.paths,
+          });
+      }
     });
   }, []);
   useEffect(() => {
@@ -190,9 +360,16 @@ export default function App() {
     setRemoteLoading(false);
     if (current?.sftp) {
       setRemoteLoading(true);
-      void api<Listing>("files:list", current.id, ".")
+      void api<Listing>(
+        "files:list",
+        current.id,
+        remotePathMemo.current[active] || ".",
+      )
         .then((r) => {
-          if (!cancelled) setRemote(r);
+          if (!cancelled) {
+            setRemote(r);
+            remotePathMemo.current[active] = r.path;
+          }
         })
         .catch((e) => {
           if (!cancelled) setFileError(e.message);
@@ -205,6 +382,25 @@ export default function App() {
       cancelled = true;
     };
   }, [active, current?.sftp]);
+  useEffect(() => {
+    let cancelled = false;
+    const key = active;
+    const dir = localPathMemo.current[key] ?? "";
+    void api<Listing>("files:list", null, dir)
+      .then((r) => {
+        if (!cancelled && key === activeRef.current) {
+          setLocal(r);
+          setLocalSelection([]);
+          localPathMemo.current[key] = r.path;
+        }
+      })
+      .catch((e) => {
+        if (!cancelled && key === activeRef.current) setFileError(e.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [active]);
   const openEditor = (d: Device) => {
     setEditing({ ...d, jumps: [...d.jumps] });
     setSecret("");
@@ -257,6 +453,8 @@ export default function App() {
   const close = async (id: string) => {
     await api("sessions:close", id).catch(notify);
     disposeTerminal(id);
+    delete remotePathMemo.current[id];
+    delete localPathMemo.current[id];
     const remaining = sessions.filter((s) => s.id !== id);
     setSessions(remaining);
     setPanes((p) => p.filter((x) => x !== id));
@@ -279,10 +477,16 @@ export default function App() {
     setPanes(mode === "none" ? [active] : sessions.map((s) => s.id));
   };
   const refreshLocal = async (dir = local.path) => {
+    const key = activeRef.current;
     try {
       const r = await api<Listing>("files:list", null, dir);
-      setLocal(r);
-      setLocalSelection([]);
+      localPathMemo.current[key] = r.path;
+      localPathMemo.current[""] = r.path;
+      if (key === activeRef.current) {
+        setLocal(r);
+        setLocalSelection([]);
+        refocusIfLost("local");
+      }
     } catch (e) {
       setFileError((e as Error).message);
     }
@@ -293,9 +497,11 @@ export default function App() {
     setRemoteLoading(true);
     try {
       const r = await api<Listing>("files:list", id, dir);
+      remotePathMemo.current[id] = r.path;
       if (id === activeRef.current) {
         setRemote(r);
         setRemoteSelection([]);
+        refocusIfLost("remote");
       }
     } catch (e) {
       setFileError((e as Error).message);
@@ -330,18 +536,42 @@ export default function App() {
       setFileError((e as Error).message);
     }
   };
+  // Browser display order: directories first, then names in natural order
+  // ("2" before "10"), shared by rendering and shift-range selection.
+  const sortedEntries = (listing: Listing) =>
+    [...listing.entries].sort(
+      (a, b) =>
+        Number(b.directory) - Number(a.directory) ||
+        a.name.localeCompare(b.name, undefined, { numeric: true }),
+    );
   const selected = (
     side: "local" | "remote",
-    name: string,
+    listing: Listing,
+    entry: Entry,
     e: React.MouseEvent,
   ) => {
     const update = side === "local" ? setLocalSelection : setRemoteSelection;
+    // Range selection follows the order the browser renders (dirs first, then
+    // natural-sorted names) so shift ranges match what the user sees.
+    const order = sortedEntries(listing).map((x) => x.name);
+    const index = order.indexOf(entry.name);
+    const anchor = selectionAnchor.current;
+    if (e.shiftKey && index >= 0) {
+      if (anchor && anchor.side === side) {
+        const anchorIndex = order.indexOf(anchor.name);
+        const from = anchorIndex >= 0 ? anchorIndex : index;
+        const [a, b] = [from, index].sort((x, y) => x - y);
+        update(order.slice(a, b + 1));
+      } else update([entry.name]);
+      return;
+    }
+    selectionAnchor.current = { side, name: entry.name };
     update((prev) =>
       e.ctrlKey || e.metaKey
-        ? prev.includes(name)
-          ? prev.filter((n) => n !== name)
-          : [...prev, name]
-        : [name],
+        ? prev.includes(entry.name)
+          ? prev.filter((n) => n !== entry.name)
+          : [...prev, entry.name]
+        : [entry.name],
     );
   };
   const openFile = (
@@ -357,14 +587,375 @@ export default function App() {
         side === "local" ? "本机" : current?.route.at(-1)?.name || "远程设备",
     });
   };
+  const sessionOf = (side: "local" | "remote") =>
+    side === "remote" ? active : null;
+  const refreshSide = (side: "local" | "remote", dir: string) => {
+    focusEntries(side);
+    void (side === "local" ? refreshLocal(dir) : refreshRemote(dir));
+  };
+  const doRename = async (
+    side: "local" | "remote",
+    listing: Listing,
+    entry: Entry,
+  ) => {
+    if (side === "remote" && !current?.sftp) return;
+    const name = await askText(
+      "重命名",
+      entry.name,
+      `将 "${entry.name}" 重命名为：`,
+      true,
+      side,
+    );
+    if (!name || name === entry.name) return;
+    let target = name,
+      overwrite = false;
+    if (listing.entries.some((e) => e.name === name)) {
+      const c = await askChoice(
+        "目标已存在",
+        `"${name}" 已存在于当前目录，选择覆盖或自动改名。`,
+        [
+          { label: "取消", value: "" },
+          { label: "覆盖", value: "overwrite" },
+          { label: "自动改名", value: "auto" },
+        ],
+        side,
+      );
+      if (!c) return;
+      if (c === "overwrite") overwrite = true;
+      else target = uniqueName(listing.entries, name);
+    }
+    try {
+      await api(
+        "files:rename",
+        sessionOf(side),
+        join(listing.path, entry.name),
+        join(listing.path, target),
+        overwrite,
+      );
+      if (!overwrite)
+        pushUndo({
+          side,
+          sessionId: side === "remote" ? active : "",
+          kind: "rename",
+          from: join(listing.path, entry.name),
+          to: join(listing.path, target),
+        });
+      refreshSide(side, listing.path);
+    } catch (e) {
+      setFileError((e as Error).message);
+    }
+  };
+  const doDelete = async (
+    side: "local" | "remote",
+    listing: Listing,
+    names: string[],
+  ) => {
+    if (!names.length) return;
+    const detail =
+      names.length > 1
+        ? `将永久删除 ${names.length} 项（目录会递归删除），此操作不可恢复。`
+        : `将永久删除 "${names[0]}"（目录会递归删除），此操作不可恢复。`;
+    const c = await askChoice(
+      "确认删除",
+      detail,
+      [
+        { label: "取消", value: "" },
+        { label: "删除", value: "ok", danger: true },
+      ],
+      side,
+    );
+    if (!c) return;
+    (side === "local" ? setLocalSelection : setRemoteSelection)([]);
+    if (fileClip && fileClip.side === side) {
+      const deleted = new Set(names.map((n) => join(listing.path, n)));
+      const rest = fileClip.paths.filter((p) => !deleted.has(p));
+      setFileClip(rest.length ? { ...fileClip, paths: rest } : null);
+    }
+    try {
+      await api(
+        "files:delete",
+        sessionOf(side),
+        names.map((n) => join(listing.path, n)),
+      );
+      if (side === "local") refreshSide(side, listing.path);
+    } catch (e) {
+      setFileError((e as Error).message);
+    }
+  };
+  const doClip = (
+    side: "local" | "remote",
+    listing: Listing,
+    names: string[],
+    op: "copy" | "move",
+  ) => {
+    if (!names.length) return;
+    setFileClip({
+      side,
+      op,
+      sessionId: side === "remote" ? active : "",
+      paths: names.map((n) => join(listing.path, n)),
+    });
+  };
+  const doPaste = async (side: "local" | "remote", listing: Listing) => {
+    if (!fileClip || fileClip.side !== side) {
+      setFileError("剪贴板是空的，或内容来自另一侧");
+      return;
+    }
+    if (side === "remote" && fileClip.sessionId !== active) {
+      setFileError("剪贴板内容来自其他设备的会话");
+      return;
+    }
+    if (
+      fileClip.op === "move" &&
+      fileClip.paths.some(
+        (p) =>
+          p === listing.path || listing.path.startsWith(p.replace(/\/?$/, "/")),
+      )
+    ) {
+      setFileError("不能移动到自身或其子目录");
+      return;
+    }
+    try {
+      const r = await api<{
+        moved?: { from: string; to: string }[];
+        copied?: string[];
+        skipped?: number;
+        overwritten?: number;
+      }>(
+        "files:paste",
+        sessionOf(side),
+        fileClip.op,
+        fileClip.paths,
+        listing.path,
+      );
+      if (fileClip.op === "move") setFileClip(null);
+      if (side === "local") {
+        refreshSide(side, listing.path);
+        if (!r.overwritten) {
+          if (fileClip.op === "move" && r.moved?.length)
+            pushUndo({
+              side,
+              sessionId: "",
+              kind: "move",
+              pairs: r.moved,
+            });
+          else if (fileClip.op === "copy" && r.copied?.length)
+            pushUndo({ side, sessionId: "", kind: "copy", paths: r.copied });
+        }
+      } else setShowQueue(true);
+    } catch (e) {
+      setFileError((e as Error).message);
+    }
+  };
+  const doNew = async (
+    side: "local" | "remote",
+    listing: Listing,
+    type: "dir" | "file",
+  ) => {
+    if (side === "remote" && !current?.sftp) return;
+    const name = await askText(
+      type === "dir" ? "新建文件夹" : "新建文件",
+      type === "dir" ? "新建文件夹" : "新建文件.txt",
+      undefined,
+      false,
+      side,
+    );
+    if (!name) return;
+    try {
+      const target = await api<string>(
+        type === "dir" ? "files:mkdir" : "files:touch",
+        sessionOf(side),
+        listing.path,
+        name,
+      );
+      pushUndo({
+        side,
+        sessionId: side === "remote" ? active : "",
+        kind: "create",
+        paths: [target],
+      });
+      refreshSide(side, listing.path);
+    } catch (e) {
+      setFileError((e as Error).message);
+    }
+  };
+  const doUndo = async (side: "local" | "remote") => {
+    if (undoBusy.current) return;
+    let idx = -1;
+    for (let i = undoStack.length - 1; i >= 0; i--) {
+      const u = undoStack[i];
+      if (u.side === side && (side === "local" || u.sessionId === active)) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx === -1) return;
+    const op = undoStack[idx];
+    setUndoStack((s) => s.filter((_, i) => i !== idx));
+    undoBusy.current = true;
+    const sid = side === "remote" ? op.sessionId : null;
+    try {
+      if (op.kind === "rename" && op.from && op.to) {
+        await api("files:rename", sid, op.to, op.from, false);
+      } else if (op.kind === "move" && op.pairs?.length) {
+        const groups = new Map<string, string[]>();
+        for (const p of op.pairs) {
+          const dest =
+            p.from.slice(0, Math.max(p.from.lastIndexOf("/"), 0)) || "/";
+          const list = groups.get(dest) || [];
+          list.push(p.to);
+          groups.set(dest, list);
+        }
+        for (const [dest, tos] of groups)
+          await api("files:paste", sid, "move", tos, dest, false);
+      } else if (
+        (op.kind === "copy" || op.kind === "create") &&
+        op.paths?.length
+      ) {
+        await api("files:delete", sid, op.paths);
+      } else return;
+      refreshSide(side, side === "local" ? local.path : remote.path);
+    } catch (e) {
+      setFileError((e as Error).message);
+    } finally {
+      undoBusy.current = false;
+    }
+  };
+  const doStat = async (
+    side: "local" | "remote",
+    listing: Listing,
+    entry: Entry,
+  ) => {
+    try {
+      const st = await api<FileStat>(
+        "files:stat",
+        sessionOf(side),
+        join(listing.path, entry.name),
+      );
+      setDialog({
+        kind: "stat",
+        title: "属性",
+        name: entry.name,
+        path: join(listing.path, entry.name),
+        stat: st,
+      });
+    } catch (e) {
+      setFileError((e as Error).message);
+    }
+  };
+  const showFileMenu = (
+    side: "local" | "remote",
+    listing: Listing,
+    entry?: Entry,
+  ) => {
+    if (side === "remote" && !current?.sftp) return;
+    const sel = side === "local" ? localSelection : remoteSelection;
+    if (entry && !sel.includes(entry.name))
+      (side === "local" ? setLocalSelection : setRemoteSelection)([entry.name]);
+    const names = entry ? (sel.includes(entry.name) ? sel : [entry.name]) : sel;
+    void api("files:menu", {
+      side,
+      hasSelection: names.length > 0,
+      selectionCount: names.length,
+      entryCount: listing.entries.length,
+      isFile:
+        names.length === 1
+          ? !listing.entries.find((e) => e.name === names[0])?.directory
+          : false,
+      canPaste:
+        !!fileClip &&
+        fileClip.side === side &&
+        (side === "local" || fileClip.sessionId === active),
+      canUndo: undoStack.some(
+        (u) => u.side === side && (side === "local" || u.sessionId === active),
+      ),
+    }).catch(notify);
+  };
+  fileMenuRef.current = (side, action) => {
+    const listing = side === "local" ? local : remote;
+    const sel = (side === "local" ? localSelection : remoteSelection).filter(
+      (n) => listing.entries.some((e) => e.name === n),
+    );
+    const single =
+      sel.length === 1 ? listing.entries.find((e) => e.name === sel[0]) : null;
+    if (action === "newDir") void doNew(side, listing, "dir");
+    else if (action === "newFile") void doNew(side, listing, "file");
+    else if (action === "cut") doClip(side, listing, sel, "move");
+    else if (action === "copy") doClip(side, listing, sel, "copy");
+    else if (action === "paste") void doPaste(side, listing);
+    else if (action === "undo") void doUndo(side);
+    else if (action === "selectAll")
+      (side === "local" ? setLocalSelection : setRemoteSelection)(
+        listing.entries.map((e) => e.name),
+      );
+    else if (action === "rename") {
+      if (single) void doRename(side, listing, single);
+    } else if (action === "delete") void doDelete(side, listing, sel);
+    else if (action === "preview") {
+      if (single && !single.directory) openFile(side, listing, single);
+    } else if (action === "stat") {
+      if (single) void doStat(side, listing, single);
+    }
+  };
+  const handleFileKeys = (
+    side: "local" | "remote",
+    listing: Listing,
+    e: React.KeyboardEvent,
+  ) => {
+    const t = e.target as HTMLElement;
+    if (t.tagName === "INPUT" || t.tagName === "TEXTAREA") return;
+    const sel = (side === "local" ? localSelection : remoteSelection).filter(
+      (n) => listing.entries.some((en) => en.name === n),
+    );
+    const key = e.key.toLowerCase();
+    if (e.key === "F5") {
+      e.preventDefault();
+      refreshSide(side, listing.path);
+    } else if (e.key === "F2" && sel.length === 1) {
+      e.preventDefault();
+      const entry = listing.entries.find((x) => x.name === sel[0]);
+      if (entry) void doRename(side, listing, entry);
+    } else if (e.key === "Delete" && sel.length) {
+      e.preventDefault();
+      void doDelete(side, listing, sel);
+    } else if ((e.ctrlKey || e.metaKey) && key === "x" && sel.length) {
+      e.preventDefault();
+      doClip(side, listing, sel, "move");
+    } else if ((e.ctrlKey || e.metaKey) && key === "c" && sel.length) {
+      e.preventDefault();
+      doClip(side, listing, sel, "copy");
+    } else if ((e.ctrlKey || e.metaKey) && key === "v") {
+      e.preventDefault();
+      void doPaste(side, listing);
+    } else if ((e.ctrlKey || e.metaKey) && key === "z") {
+      e.preventDefault();
+      void doUndo(side);
+    } else if ((e.ctrlKey || e.metaKey) && key === "a") {
+      e.preventDefault();
+      (side === "local" ? setLocalSelection : setRemoteSelection)(
+        listing.entries.map((en) => en.name),
+      );
+    }
+  };
   const renderBrowser = (side: "local" | "remote") => {
     const listing = side === "local" ? local : remote,
       selection = side === "local" ? localSelection : remoteSelection,
       refresh = side === "local" ? refreshLocal : refreshRemote;
     const ready = side === "local" || current?.sftp;
+    const clipNames =
+      fileClip &&
+      fileClip.side === side &&
+      (side === "local" || fileClip.sessionId === active)
+        ? new Set(
+            fileClip.paths.map(
+              (p) => p.split(/[\\/]/).filter(Boolean).pop() || "",
+            ),
+          )
+        : null;
     return (
       <section
         className="browser"
+        onKeyDown={(e) => handleFileKeys(side, listing, e)}
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes("application/x-sshto"))
             e.preventDefault();
@@ -427,7 +1018,22 @@ export default function App() {
             修改时间
           </span>
         </div>
-        <div className="entries">
+        <div
+          className="entries"
+          tabIndex={0}
+          ref={(el) => {
+            entriesRef.current[side] = el;
+          }}
+          onClick={(e) => {
+            if ((e.target as HTMLElement).closest(".entry")) return;
+            (side === "local" ? setLocalSelection : setRemoteSelection)([]);
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            entriesRef.current[side]?.focus();
+            showFileMenu(side, listing);
+          }}
+        >
           {!ready ? (
             <div className="file-empty">
               {current?.sftpMessage || "连接设备后，即可拖拽传输文件"}
@@ -437,74 +1043,84 @@ export default function App() {
           ) : listing.entries.length === 0 ? (
             <div className="file-empty">此目录为空</div>
           ) : (
-            [...listing.entries]
-              .sort(
-                (a, b) =>
-                  Number(b.directory) - Number(a.directory) ||
-                  a.name.localeCompare(b.name),
-              )
-              .map((entry: Entry) => (
-                <div
-                  key={entry.name}
-                  tabIndex={0}
-                  role="button"
-                  aria-label={entry.name}
-                  className={`entry ${selection.includes(entry.name) ? "selected" : ""}`}
-                  onClick={(e) => selected(side, entry.name, e)}
-                  title={
-                    entry.linkError ||
-                    (entry.symlink
-                      ? entry.directory
-                        ? "软链接目录，双击进入"
-                        : "软链接文件"
-                      : undefined)
-                  }
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      if (entry.linkError) setFileError(entry.linkError);
-                      else if (entry.directory)
-                        void refresh(join(listing.path, entry.name));
-                      else openFile(side, listing, entry);
-                    }
-                  }}
-                  onDoubleClick={() => {
+            sortedEntries(listing).map((entry: Entry) => (
+              <div
+                key={entry.name}
+                tabIndex={0}
+                role="button"
+                aria-label={entry.name}
+                className={`entry ${selection.includes(entry.name) ? "selected" : ""} ${
+                  clipNames?.has(entry.name)
+                    ? fileClip!.op === "move"
+                      ? "clip-cut"
+                      : "clip-copy"
+                    : ""
+                }`}
+                onClick={(e) => selected(side, listing, entry, e)}
+                title={
+                  entry.linkError ||
+                  (entry.symlink
+                    ? entry.directory
+                      ? "软链接目录，双击进入"
+                      : "软链接文件"
+                    : undefined)
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
                     if (entry.linkError) setFileError(entry.linkError);
                     else if (entry.directory)
                       void refresh(join(listing.path, entry.name));
                     else openFile(side, listing, entry);
-                  }}
-                  draggable={!entry.symlink}
-                  onDragStart={(e) => {
-                    const names = selection.includes(entry.name)
-                      ? selection
-                      : [entry.name];
-                    e.dataTransfer.setData(
-                      "application/x-sshto",
-                      JSON.stringify({
-                        side,
-                        sources: names.map((n) => join(listing.path, n)),
-                      }),
-                    );
-                    e.dataTransfer.effectAllowed = "copy";
-                  }}
-                >
-                  {entry.directory ? (
-                    <Folder size={15} className="folder" />
-                  ) : (
-                    <File size={15} />
-                  )}
-                  <span>
-                    {entry.name}
-                    {entry.symlink ? " ↗" : ""}
-                  </span>
-                  <small className="file-size">
-                    {entry.directory ? "—" : size(entry.size)}
-                  </small>
-                  <small className="file-mtime" title="按本机时区显示">
-                    {fileTime(entry.mtime)}
-                  </small>
-                </div>
-              ))
+                  }
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  showFileMenu(side, listing, entry);
+                }}
+                onDoubleClick={() => {
+                  if (entry.linkError) setFileError(entry.linkError);
+                  else if (entry.directory)
+                    void refresh(join(listing.path, entry.name));
+                  else if (side === "local")
+                    void api(
+                      "files:open",
+                      join(listing.path, entry.name),
+                    ).catch((e) => setFileError(e.message));
+                  else openFile(side, listing, entry);
+                }}
+                draggable={!entry.symlink}
+                onDragStart={(e) => {
+                  const names = selection.includes(entry.name)
+                    ? selection
+                    : [entry.name];
+                  e.dataTransfer.setData(
+                    "application/x-sshto",
+                    JSON.stringify({
+                      side,
+                      sources: names.map((n) => join(listing.path, n)),
+                    }),
+                  );
+                  e.dataTransfer.effectAllowed = "copy";
+                }}
+              >
+                {entry.directory ? (
+                  <Folder size={15} className="folder" />
+                ) : (
+                  <File size={15} />
+                )}
+                <span>
+                  {entry.name}
+                  {entry.symlink ? " ↗" : ""}
+                </span>
+                <small className="file-size">
+                  {entry.directory ? "—" : size(entry.size)}
+                </small>
+                <small className="file-mtime" title="按本机时区显示">
+                  {fileTime(entry.mtime)}
+                </small>
+              </div>
+            ))
           )}
         </div>
       </section>
@@ -918,22 +1534,35 @@ export default function App() {
                               <Check size={18} />
                             ) : t.direction === "upload" ? (
                               <Upload size={18} />
-                            ) : (
+                            ) : t.direction === "download" ? (
                               <Download size={18} />
+                            ) : t.direction === "remote-copy" ? (
+                              <Copy size={18} />
+                            ) : t.direction === "remote-move" ? (
+                              <Scissors size={18} />
+                            ) : (
+                              <Trash2 size={18} />
                             )}
                           </span>
                           <div className="task-info">
                             <strong>
                               {t.sources
-                                .map((s) => s.split("/").at(-1))
+                                .map((s) =>
+                                  s.split(/[\\/]/).filter(Boolean).at(-1),
+                                )
                                 .join(", ")}
                             </strong>
                             <small>
                               {sessions
                                 .find((s) => s.id === t.sessionId)
-                                ?.route.at(-1)?.name || "已关闭的会话"}{" "}
-                              · {t.direction === "upload" ? "上传至" : "下载至"}{" "}
-                              {t.destination}
+                                ?.route.at(-1)?.name || "已关闭的会话"}
+                              {t.direction === "upload"
+                                ? ` · 上传至 ${t.destination}`
+                                : t.direction === "download"
+                                  ? ` · 下载至 ${t.destination}`
+                                  : t.direction === "remote-delete"
+                                    ? " · 递归删除"
+                                    : ` · ${t.direction === "remote-copy" ? "复制到" : "移动到"} ${t.destination}`}
                             </small>
                             <progress
                               max={Math.max(t.total, 1)}
@@ -963,7 +1592,8 @@ export default function App() {
                             >
                               <X size={16} />
                             </button>
-                          ) : ["error", "cancelled"].includes(t.status) ? (
+                          ) : ["error", "cancelled"].includes(t.status) &&
+                            ["upload", "download"].includes(t.direction) ? (
                             <button
                               title="重试传输"
                               onClick={() =>
@@ -1029,6 +1659,188 @@ export default function App() {
             requestAnimationFrame(() => previewTrigger.current?.focus());
           }}
         />
+      )}
+      {dialog?.kind === "text" && (
+        <div className="overlay">
+          <form
+            className="modal"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const v = dialogInputRef.current?.value.trim() || "";
+              dialog.resolve(v || null);
+              setDialog(null);
+              focusEntries(dialog.side);
+            }}
+          >
+            <div className="modal-title">
+              <div className="modal-icon">
+                <Pencil size={22} />
+              </div>
+              <div>
+                <h2>{dialog.title}</h2>
+                {dialog.detail && <p>{dialog.detail}</p>}
+              </div>
+              <button
+                type="button"
+                title="关闭"
+                onClick={() => {
+                  dialog.resolve(null);
+                  setDialog(null);
+                  focusEntries(dialog.side);
+                }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <label>
+              名称
+              <input
+                ref={dialogInputRef}
+                autoFocus
+                required
+                defaultValue={dialog.initial}
+                onFocus={(e) => {
+                  const input = e.currentTarget;
+                  if (dialog.selectBase) {
+                    const dot = dialog.initial.lastIndexOf(".");
+                    input.setSelectionRange(
+                      0,
+                      dot > 0 ? dot : dialog.initial.length,
+                    );
+                  } else input.select();
+                }}
+              />
+            </label>
+            <div className="modal-footer">
+              <span />
+              <button
+                type="button"
+                onClick={() => {
+                  dialog.resolve(null);
+                  setDialog(null);
+                  focusEntries(dialog.side);
+                }}
+              >
+                取消
+              </button>
+              <button type="submit" onClick={() => focusEntries(dialog.side)}>
+                确定
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+      {dialog?.kind === "choice" && (
+        <div className="overlay">
+          <div
+            ref={modalRef}
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={dialog.title}
+            tabIndex={-1}
+            onKeyDown={(e) =>
+              modalKeyDown(
+                e,
+                () => {
+                  dialog.resolve(dialog.actions.at(-1)!.value);
+                  setDialog(null);
+                  focusEntries(dialog.side);
+                },
+                () => {
+                  dialog.resolve(dialog.actions[0]?.value ?? "");
+                  setDialog(null);
+                  focusEntries(dialog.side);
+                },
+              )
+            }
+          >
+            <div className="modal-title">
+              <div className="modal-icon">
+                <Info size={22} />
+              </div>
+              <div>
+                <h2>{dialog.title}</h2>
+                <p>{dialog.detail}</p>
+              </div>
+              <button
+                type="button"
+                title="关闭"
+                onClick={() => {
+                  dialog.resolve("");
+                  setDialog(null);
+                  focusEntries(dialog.side);
+                }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="modal-footer">
+              <span />
+              {dialog.actions.map((a) => (
+                <button
+                  key={a.value}
+                  className={a.danger ? "danger" : ""}
+                  onClick={() => {
+                    dialog.resolve(a.value);
+                    setDialog(null);
+                    focusEntries(dialog.side);
+                  }}
+                >
+                  {a.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+      {dialog?.kind === "stat" && (
+        <div className="overlay">
+          <div
+            ref={modalRef}
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="文件属性"
+            tabIndex={-1}
+            onKeyDown={(e) => modalKeyDown(e, null, () => setDialog(null))}
+          >
+            <div className="modal-title">
+              <div className="modal-icon">
+                <Info size={22} />
+              </div>
+              <div>
+                <h2>属性</h2>
+                <p>{dialog.name}</p>
+              </div>
+              <button title="关闭" onClick={() => setDialog(null)}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="stat-list">
+              <span>路径</span>
+              <code>{dialog.path}</code>
+              <span>类型</span>
+              <span>{dialog.stat.directory ? "目录" : "文件"}</span>
+              <span>大小</span>
+              <span>
+                {dialog.stat.directory ? "—" : size(dialog.stat.size)}
+              </span>
+              <span>修改时间</span>
+              <span>{fileTime(dialog.stat.mtime)}</span>
+              <span>权限</span>
+              <span>{perms(dialog.stat.mode)}</span>
+              <span>所有者</span>
+              <span>
+                {dialog.stat.uid} / {dialog.stat.gid}
+              </span>
+            </div>
+            <div className="modal-footer">
+              <span />
+              <button onClick={() => setDialog(null)}>关闭</button>
+            </div>
+          </div>
+        </div>
       )}
       {editing && (
         <div className="overlay">

@@ -6,6 +6,7 @@ const {
   safeStorage,
   clipboard,
   Menu,
+  shell,
 } = require("electron");
 const path = require("node:path");
 const { Store, SSHService } = require("./backend.cjs");
@@ -99,6 +100,21 @@ app.whenReady().then(async () => {
     "files:preview-cancel": (requestId) => service.previews.cancel(requestId),
     "files:transfer": (id, d, s, dest) => service.transfer(id, d, s, dest),
     "files:cancel": (id) => service.cancel(id),
+    "files:rename": (id, src, dst, overwrite) =>
+      service.rename(id, src, dst, overwrite === true),
+    "files:mkdir": (id, dir, name) => service.mkdir(id, dir, name),
+    "files:touch": (id, dir, name) => service.touch(id, dir, name),
+    "files:delete": (id, paths) => service.remove(id, paths),
+    "files:paste": (id, op, sources, dest, recordUndo) =>
+      service.paste(id, op, sources, dest, recordUndo !== false),
+    "files:stat": (id, target) => service.stat(id, target),
+    "files:save": (id, p, content, baseMtime, force) =>
+      service.saveFile(id, p, content, baseMtime, force === true),
+    "files:open": async (p) => {
+      if (typeof p !== "string" || !p) throw Error("路径无效");
+      const err = await shell.openPath(p);
+      if (err) throw Error(err);
+    },
     "dialog:key": async () => {
       const r = await dialog.showOpenDialog(win, {
         title: "选择 SSH 私钥",

@@ -108,7 +108,6 @@ export default function Terminal({
   return (
     <div
       className="terminal"
-      ref={ref}
       onContextMenuCapture={(event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -120,6 +119,10 @@ export default function Terminal({
           selection: term.getSelection(),
         }).catch((error) => errorRef.current(error));
       }}
-    />
+    >
+      {/* FitAddon measures the direct parent of .xterm; keep padding on the outer
+          .terminal so rows are computed from the unpadded host and never overflow. */}
+      <div className="terminal-host" ref={ref} />
+    </div>
   );
 }

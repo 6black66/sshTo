@@ -36,6 +36,7 @@ describe("read-only file preview", () => {
       text: "",
       bytesRead: 0,
       truncated: false,
+      mtime: expect.any(Number),
     });
     expect(reader.requests.size).toBe(0);
   });

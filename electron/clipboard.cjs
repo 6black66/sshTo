@@ -69,6 +69,99 @@ function createClipboardHandlers(win, service, { clipboard, Menu }) {
       ]);
       menu.popup({ window: win });
     },
+    "files:menu": (options) => {
+      if (
+        !options ||
+        !["local", "remote"].includes(options.side) ||
+        typeof options.hasSelection !== "boolean" ||
+        typeof options.canPaste !== "boolean"
+      )
+        throw Error("文件菜单参数无效");
+      const send = (action) => {
+        if (!win.isDestroyed())
+          win.webContents.send("ssh:event", {
+            type: "file-menu",
+            id: "",
+            side: options.side,
+            action,
+          });
+      };
+      const single = options.selectionCount === 1;
+      const menu = Menu.buildFromTemplate([
+        {
+          label: "撤销",
+          accelerator: "Ctrl+Z",
+          registerAccelerator: false,
+          enabled: options.canUndo === true,
+          click: () => send("undo"),
+        },
+        {
+          label: "全选",
+          accelerator: "Ctrl+A",
+          registerAccelerator: false,
+          enabled: (options.entryCount || 0) > 0,
+          click: () => send("selectAll"),
+        },
+        { type: "separator" },
+        {
+          label: "新建文件夹",
+          click: () => send("newDir"),
+        },
+        {
+          label: "新建文件",
+          click: () => send("newFile"),
+        },
+        { type: "separator" },
+        {
+          label: "剪切",
+          accelerator: "Ctrl+X",
+          registerAccelerator: false,
+          enabled: options.hasSelection,
+          click: () => send("cut"),
+        },
+        {
+          label: "复制",
+          accelerator: "Ctrl+C",
+          registerAccelerator: false,
+          enabled: options.hasSelection,
+          click: () => send("copy"),
+        },
+        {
+          label: "粘贴",
+          accelerator: "Ctrl+V",
+          registerAccelerator: false,
+          enabled: options.canPaste,
+          click: () => send("paste"),
+        },
+        { type: "separator" },
+        {
+          label: "重命名",
+          accelerator: "F2",
+          registerAccelerator: false,
+          enabled: single,
+          click: () => send("rename"),
+        },
+        {
+          label: "删除",
+          accelerator: "Delete",
+          registerAccelerator: false,
+          enabled: options.hasSelection,
+          click: () => send("delete"),
+        },
+        { type: "separator" },
+        {
+          label: "预览",
+          enabled: single && options.isFile === true,
+          click: () => send("preview"),
+        },
+        {
+          label: "属性",
+          enabled: single,
+          click: () => send("stat"),
+        },
+      ]);
+      menu.popup({ window: win });
+    },
   };
 }
 module.exports = { createClipboardHandlers };
