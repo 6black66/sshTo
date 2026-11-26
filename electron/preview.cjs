@@ -56,6 +56,11 @@ class PreviewReader {
           : await fs.promises.stat(filePath);
         if (settled) return;
         if (!stat.isFile()) throw Error("仅支持预览普通文件");
+        const mtime = ftp
+          ? typeof stat.mtime === "number"
+            ? stat.mtime * 1000
+            : null
+          : stat.mtimeMs;
         const options = {
           start: 0,
           end: PREVIEW_LIMIT,
@@ -90,7 +95,7 @@ class PreviewReader {
             const text = decoder.decode(bytes, { stream: truncated });
             if (/[\x00-\x08\x0B\x0E-\x1A\x1C-\x1F\x7F]/.test(text))
               throw Error("binary");
-            finish(null, { text, truncated, bytesRead: bytes.length });
+            finish(null, { text, truncated, bytesRead: bytes.length, mtime });
           } catch {
             finish(Error("暂不支持预览二进制或非 UTF-8 文件，请下载后查看"));
           }

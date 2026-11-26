@@ -44,6 +44,19 @@ export interface Task {
   started?: number;
   current?: string;
   message?: string;
+  undo?: {
+    kind: "move" | "copy";
+    pairs?: { from: string; to: string }[];
+    paths?: string[];
+  };
+}
+export interface FileStat {
+  directory: boolean;
+  size: number;
+  mtime: number | null;
+  mode: number;
+  uid: number;
+  gid: number;
 }
 export interface SSHEvent {
   type: string;
@@ -54,6 +67,8 @@ export interface SSHEvent {
   message?: string;
   available?: boolean;
   task?: Task;
+  side?: "local" | "remote";
+  action?: string;
 }
 declare global {
   interface Window {
@@ -70,4 +85,5 @@ export interface FilePreview {
   text: string;
   truncated: boolean;
   bytesRead: number;
+  mtime?: number | null;
 }

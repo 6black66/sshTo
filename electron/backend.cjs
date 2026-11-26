@@ -455,6 +455,353 @@ class SSHService extends EventEmitter {
       for (const stream of t.streams || []) stream.destroy(Error("传输已取消"));
     }
   }
+  validName(name) {
+    if (
+      typeof name !== "string" ||
+      !name.trim().length ||
+      name === "." ||
+      name === ".." ||
+      /[/\\]/.test(name)
+    )
+      throw Error("名称不能为空或包含路径分隔符");
+    return name;
+  }
+  async rmRemote(ftp, src) {
+    let st;
+    try {
+      st = await call(ftp, "lstat", src);
+    } catch (e) {
+      if (e.code === 2) return;
+      throw e;
+    }
+    if (st.isDirectory() && !st.isSymbolicLink()) {
+      const items = await call(ftp, "readdir", src);
+      for (const x of items)
+        if (![".", ".."].includes(x.filename))
+          await this.rmRemote(ftp, path.posix.join(src, x.filename));
+      await call(ftp, "rmdir", src);
+    } else await call(ftp, "unlink", src);
+  }
+  async remoteRename(ftp, src, dst) {
+    try {
+      await call(ftp, "rename", src, dst);
+    } catch (e) {
+      await call(ftp, "ext_openssh_rename", src, dst).catch(() => {
+        throw e;
+      });
+    }
+  }
+  async replaceRemote(ftp, src, dst) {
+    let existed = false;
+    const bak = dst + ".sshto-bak-" + crypto.randomUUID();
+    try {
+      await call(ftp, "lstat", dst);
+      existed = true;
+    } catch (e) {
+      if (e.code !== 2) throw e;
+    }
+    if (existed) await this.remoteRename(ftp, dst, bak);
+    try {
+      await this.remoteRename(ftp, src, dst);
+    } catch (e) {
+      if (existed) await this.remoteRename(ftp, bak, dst).catch(() => {});
+      throw e;
+    }
+    if (existed) await this.rmRemote(ftp, bak);
+    return existed;
+  }
+  async rename(id, src, dst, overwrite = false) {
+    if (typeof src !== "string" || typeof dst !== "string" || !src || !dst)
+      throw Error("重命名参数无效");
+    if (src === dst) throw Error("源和目标相同");
+    if (id) {
+      const ftp = this.sftp(id);
+      this.validName(path.posix.basename(dst));
+      if (overwrite) {
+        await this.replaceRemote(ftp, src, dst);
+        return;
+      }
+      try {
+        await call(ftp, "lstat", dst);
+        throw Error("目标已存在");
+      } catch (e) {
+        if (e.code !== 2) throw e;
+      }
+      await this.remoteRename(ftp, src, dst);
+    } else {
+      this.validName(path.basename(dst));
+      let existed = false;
+      if (overwrite) {
+        try {
+          await fs.lstat(dst);
+          existed = true;
+        } catch (e) {
+          if (e.code !== "ENOENT") throw e;
+        }
+      } else {
+        try {
+          await fs.lstat(dst);
+          throw Error("目标已存在");
+        } catch (e) {
+          if (e.code !== "ENOENT") throw e;
+        }
+      }
+      const bak = existed ? dst + ".sshto-bak-" + crypto.randomUUID() : null;
+      if (bak) await fs.rename(dst, bak);
+      try {
+        await fs.rename(src, dst).catch(async (e) => {
+          if (e.code !== "EXDEV") throw e;
+          await fs.cp(src, dst, { recursive: true });
+          await fs.rm(src, { recursive: true });
+        });
+      } catch (e) {
+        if (bak) await fs.rename(bak, dst).catch(() => {});
+        throw e;
+      }
+      if (bak) await fs.rm(bak, { recursive: true, force: true });
+    }
+  }
+  async mkdir(id, dir, name) {
+    if (typeof dir !== "string" || !dir) throw Error("目录参数无效");
+    const target = (id ? path.posix : path).join(dir, this.validName(name));
+    if (id) {
+      const ftp = this.sftp(id);
+      try {
+        await call(ftp, "mkdir", target);
+      } catch (e) {
+        try {
+          const st = await call(ftp, "stat", target);
+          if (st.isDirectory()) throw Error("同名目录已存在");
+        } catch {
+          throw e;
+        }
+        throw e;
+      }
+    } else {
+      try {
+        await fs.mkdir(target);
+      } catch (e) {
+        if (e.code === "EEXIST") throw Error("已存在同名文件或目录");
+        throw e;
+      }
+    }
+    return target;
+  }
+  async touch(id, dir, name) {
+    if (typeof dir !== "string" || !dir) throw Error("目录参数无效");
+    const target = (id ? path.posix : path).join(dir, this.validName(name));
+    if (id) {
+      const ftp = this.sftp(id);
+      const handle = await call(ftp, "open", target, "wx");
+      await call(ftp, "close", handle);
+    } else {
+      try {
+        await fs.writeFile(target, "", { flag: "wx" });
+      } catch (e) {
+        if (e.code === "EEXIST") throw Error("已存在同名文件");
+        throw e;
+      }
+    }
+    return target;
+  }
+  async remove(id, paths) {
+    if (
+      !Array.isArray(paths) ||
+      !paths.length ||
+      paths.some((p) => typeof p !== "string" || !p)
+    )
+      throw Error("删除参数无效");
+    if (id) return this.fileOp(id, "remote-delete", paths, "");
+    for (const p of paths) await fs.rm(p, { recursive: true });
+    return { done: paths.length, skipped: 0 };
+  }
+  async paste(id, op, sources, destination, recordUndo = true) {
+    if (
+      !["copy", "move"].includes(op) ||
+      !Array.isArray(sources) ||
+      !sources.length ||
+      sources.some((p) => typeof p !== "string" || !p) ||
+      typeof destination !== "string" ||
+      !destination
+    )
+      throw Error("粘贴参数无效");
+    if (id) {
+      if (!["copy", "move"].includes(op)) throw Error("粘贴参数无效");
+      return {
+        taskId: await this.fileOp(
+          id,
+          op === "copy" ? "remote-copy" : "remote-move",
+          sources,
+          destination,
+          recordUndo,
+        ),
+      };
+    }
+    const moved = [],
+      copied = [],
+      done = [];
+    let overwriteDecision,
+      skipped = 0,
+      overwritten = 0;
+    for (const src of sources) {
+      const dst = path.join(destination, path.basename(src));
+      if (dst === src || destination.startsWith(src + path.sep)) {
+        skipped++;
+        continue;
+      }
+      let exists = false;
+      try {
+        await fs.lstat(dst);
+        exists = true;
+      } catch (e) {
+        if (e.code !== "ENOENT") throw e;
+      }
+      if (exists) {
+        let approved = overwriteDecision;
+        if (approved === undefined) {
+          const decision = await this.approve({
+            kind: "overwrite",
+            path: dst,
+            sessionId: null,
+          });
+          approved =
+            typeof decision === "boolean"
+              ? decision
+              : decision?.approved === true;
+          if (
+            decision &&
+            typeof decision === "object" &&
+            decision.applyToAll === true
+          )
+            overwriteDecision = approved;
+        }
+        if (!approved) {
+          skipped++;
+          continue;
+        }
+        overwritten++;
+      }
+      if (op === "move") {
+        if (exists) await fs.rm(dst, { recursive: true, force: true });
+        await fs.rename(src, dst).catch(async (e) => {
+          if (e.code !== "EXDEV") throw e;
+          await fs.cp(src, dst, { recursive: true });
+          await fs.rm(src, { recursive: true });
+        });
+        moved.push({ from: src, to: dst });
+      } else {
+        if (exists) await fs.rm(dst, { recursive: true, force: true });
+        await fs.cp(src, dst, { recursive: true });
+        copied.push(dst);
+      }
+      done.push(dst);
+    }
+    return { moved, copied, skipped, overwritten };
+  }
+  async stat(id, target) {
+    if (typeof target !== "string" || !target) throw Error("路径无效");
+    if (id) {
+      const st = await call(this.sftp(id), "stat", target);
+      return {
+        directory: st.isDirectory(),
+        size: st.size,
+        mtime: typeof st.mtime === "number" ? st.mtime * 1000 : null,
+        mode: st.mode,
+        uid: st.uid,
+        gid: st.gid,
+      };
+    }
+    const st = await fs.stat(target);
+    return {
+      directory: st.isDirectory(),
+      size: st.size,
+      mtime: st.mtimeMs,
+      mode: st.mode,
+      uid: st.uid,
+      gid: st.gid,
+    };
+  }
+  async saveFile(id, filePath, content, baseMtime, force = false) {
+    if (typeof filePath !== "string" || !filePath || filePath.includes("\0"))
+      throw Error("保存路径无效");
+    if (typeof content !== "string") throw Error("保存内容无效");
+    if (content.length > 8 * 1024 * 1024)
+      throw Error("文件过大（超过 8 MiB），暂不支持在线编辑保存");
+    const conflict = () => Error("文件在打开后已被外部修改，请确认覆盖保存");
+    if (id) {
+      const ftp = this.sftp(id);
+      const st = await call(ftp, "stat", filePath);
+      if (!st.isFile()) throw Error("仅支持保存普通文件");
+      if (
+        !force &&
+        typeof baseMtime === "number" &&
+        typeof st.mtime === "number" &&
+        Math.abs(st.mtime * 1000 - baseMtime) > 1000
+      )
+        throw conflict();
+      await new Promise((resolve, reject) => {
+        const ws = ftp.createWriteStream(filePath, { flags: "w" });
+        ws.on("error", reject);
+        // ssh2 SFTP streams emit "close" rather than "finish" when done.
+        ws.on("close", resolve);
+        ws.end(Buffer.from(content, "utf8"));
+      });
+      const after = await call(ftp, "stat", filePath);
+      return {
+        mtime: typeof after.mtime === "number" ? after.mtime * 1000 : null,
+      };
+    }
+    const st = await fs.stat(filePath);
+    if (!st.isFile()) throw Error("仅支持保存普通文件");
+    if (
+      !force &&
+      typeof baseMtime === "number" &&
+      Math.abs(st.mtimeMs - baseMtime) > 10
+    )
+      throw conflict();
+    await fs.writeFile(filePath, content, "utf8");
+    const after = await fs.stat(filePath);
+    return { mtime: after.mtimeMs };
+  }
+  async fileOp(sessionId, op, sources, destination, recordUndo = true) {
+    if (
+      !["remote-copy", "remote-move", "remote-delete"].includes(op) ||
+      typeof sessionId !== "string" ||
+      !sessionId ||
+      !Array.isArray(sources) ||
+      !sources.length ||
+      sources.some((p) => typeof p !== "string" || !p)
+    )
+      throw Error("文件操作参数无效");
+    if (op !== "remote-delete" && typeof destination !== "string")
+      throw Error("文件操作参数无效");
+    this.sftp(sessionId);
+    const id = crypto.randomUUID();
+    const task = {
+      id,
+      sessionId,
+      direction: op,
+      sources,
+      destination: destination || "",
+      status: "queued",
+      bytes: 0,
+      total: 0,
+      cancelled: false,
+      skipped: 0,
+      recordUndo: recordUndo !== false,
+    };
+    this.tasks.set(id, task);
+    this.event("transfer", { task: { ...task } });
+    const job = this.runOp(task)
+      .catch((e) => {
+        task.status = task.cancelled ? "cancelled" : "error";
+        task.message = e.message;
+        this.event("transfer", { task: { ...task, streams: undefined } });
+      })
+      .finally(() => this.jobs.delete(id));
+    this.jobs.set(id, job);
+    return id;
+  }
   async run(t) {
     const ftp = this.sftp(t.sessionId),
       remote = t.direction === "download";
@@ -599,6 +946,175 @@ class SSHService extends EventEmitter {
         throw e;
       } finally {
         t.streams = undefined;
+      }
+    }
+    check();
+    t.status = "done";
+    t.message = t.skipped ? `已完成，跳过 ${t.skipped} 项` : "已完成";
+    this.event("transfer", { task: { ...t } });
+  }
+  async runOp(t) {
+    const ftp = this.sftp(t.sessionId);
+    t.status = "running";
+    t.started = Date.now();
+    this.event("transfer", { task: { ...t } });
+    const check = () => {
+      if (t.cancelled) throw Error("传输已取消");
+    };
+    const progress = () => this.event("transfer", { task: { ...t } });
+    if (t.direction === "remote-delete") {
+      const count = async (src) => {
+        const st = await call(ftp, "lstat", src);
+        if (st.isDirectory() && !st.isSymbolicLink()) {
+          let n = 1;
+          const items = await call(ftp, "readdir", src);
+          for (const x of items)
+            if (![".", ".."].includes(x.filename))
+              n += await count(path.posix.join(src, x.filename));
+          return n;
+        }
+        return 1;
+      };
+      let total = 0;
+      for (const src of t.sources) total += await count(src).catch(() => 0);
+      t.total = Math.max(total, 1);
+      const rmWalk = async (src) => {
+        check();
+        const st = await call(ftp, "lstat", src);
+        if (st.isDirectory() && !st.isSymbolicLink()) {
+          const items = await call(ftp, "readdir", src);
+          for (const x of items)
+            if (![".", ".."].includes(x.filename))
+              await rmWalk(path.posix.join(src, x.filename));
+          await call(ftp, "rmdir", src);
+        } else await call(ftp, "unlink", src);
+        t.bytes++;
+        progress();
+      };
+      for (const src of t.sources) {
+        check();
+        t.current = src;
+        await rmWalk(src);
+      }
+    } else {
+      let overwriteDecision,
+        overwrote = false;
+      const movedPairs = [],
+        copiedPaths = [];
+      for (const src of t.sources) {
+        check();
+        const dst = path.posix.join(t.destination, path.posix.basename(src));
+        if (dst === src || t.destination.startsWith(src + "/")) {
+          t.skipped++;
+          continue;
+        }
+        let exists = false;
+        try {
+          await call(ftp, "lstat", dst);
+          exists = true;
+        } catch (e) {
+          if (e.code !== 2) throw e;
+        }
+        if (exists) {
+          let approved = overwriteDecision;
+          if (approved === undefined) {
+            const decision = await this.approve({
+              kind: "overwrite",
+              path: dst,
+              sessionId: t.sessionId,
+              taskId: t.id,
+            });
+            check();
+            approved =
+              typeof decision === "boolean"
+                ? decision
+                : decision?.approved === true;
+            if (
+              decision &&
+              typeof decision === "object" &&
+              decision.applyToAll === true
+            )
+              overwriteDecision = approved;
+          }
+          if (!approved) {
+            t.skipped++;
+            continue;
+          }
+          overwrote = true;
+        }
+        if (t.direction === "remote-move") {
+          t.current = src;
+          t.total = t.sources.length;
+          if (exists) await this.replaceRemote(ftp, src, dst);
+          else await this.remoteRename(ftp, src, dst);
+          movedPairs.push({ from: src, to: dst });
+          t.bytes++;
+          progress();
+        } else {
+          t.current = src;
+          const files = [],
+            dirs = [];
+          let totalBytes = 0;
+          const walk = async (s, d, depth) => {
+            check();
+            if (depth > 64)
+              throw Error("目录嵌套过深或存在软链接循环，已中止复制");
+            const st = await call(ftp, "stat", s);
+            if (st.isDirectory()) {
+              dirs.push(d);
+              const items = await call(ftp, "readdir", s);
+              for (const x of items)
+                if (![".", ".."].includes(x.filename))
+                  await walk(
+                    path.posix.join(s, x.filename),
+                    path.posix.join(d, x.filename),
+                    depth + 1,
+                  );
+            } else {
+              files.push({ src: s, dst: d, size: st.size });
+              totalBytes += st.size;
+            }
+          };
+          await walk(src, dst, 0);
+          copiedPaths.push(dst);
+          t.total = Math.max(totalBytes, 1);
+          for (const d of dirs) {
+            check();
+            try {
+              await call(ftp, "mkdir", d);
+            } catch (e) {
+              try {
+                const st = await call(ftp, "stat", d);
+                if (st.isDirectory()) continue;
+              } catch {}
+              throw e;
+            }
+          }
+          for (const f of files) {
+            check();
+            t.current = f.src;
+            await new Promise((resolve, reject) => {
+              const input = ftp.createReadStream(f.src);
+              const output = ftp.createWriteStream(f.dst);
+              t.streams = [input, output];
+              input.pipe(output);
+              input.on("error", reject);
+              output.on("error", reject);
+              input.on("data", (chunk) => {
+                t.bytes += chunk.length;
+              });
+              output.on("close", resolve);
+            });
+            t.streams = undefined;
+            progress();
+          }
+        }
+      }
+      if (!overwrote && t.recordUndo !== false) {
+        if (t.direction === "remote-move" && movedPairs.length)
+          t.undo = { kind: "move", pairs: movedPairs };
+        else if (t.direction === "remote-copy" && copiedPaths.length)
+          t.undo = { kind: "copy", paths: copiedPaths };
       }
     }
     check();

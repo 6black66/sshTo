@@ -13,6 +13,8 @@
     "pack": "npm run build && electron-builder --linux AppImage deb",
     "test:integration": "node scripts/integration.cjs",
     "test:ui": "xvfb-run -a node scripts/ui-smoke.cjs",
+    "test:ui-probe": "xvfb-run -a node scripts/ui-probe.cjs",
+    "bench:connect": "node scripts/connect-bench.cjs",
     "format": "prettier --write src electron scripts tests vite.config.ts"
   },
   "build": {

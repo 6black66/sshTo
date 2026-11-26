@@ -392,6 +392,9 @@ main {
   padding: 13px 8px 5px 16px;
   overflow: hidden;
 }
+.terminal-host {
+  height: 100%;
+}
 .xterm {
   height: 100%;
 }
@@ -647,6 +650,7 @@ h1 {
   flex: 1;
   min-height: 30px;
   padding: 5px 8px;
+  outline: none;
 }
 .entry {
   display: grid;
@@ -679,6 +683,12 @@ h1 {
   color: #d7e1ff;
 }
 .entry:focus-visible {
+  box-shadow: inset 0 0 0 1px #7a90d5;
+}
+.entry.clip-cut {
+  opacity: 0.45;
+}
+.entry.clip-copy:not(.selected) {
   box-shadow: inset 0 0 0 1px #7a90d5;
 }
 .folder {
@@ -996,6 +1006,22 @@ progress::-webkit-progress-value {
 .danger {
   color: #d79296;
 }
+.stat-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 14px;
+  font-size: 12px;
+  margin-top: 14px;
+  align-items: baseline;
+}
+.stat-list > span:nth-child(odd) {
+  color: #8b95ab;
+}
+.stat-list code {
+  word-break: break-all;
+  font-size: 11px;
+  color: #c8d2e5;
+}
 .toast {
   position: fixed;
   bottom: 45px;
@@ -1075,6 +1101,9 @@ progress::-webkit-progress-value {
 .file-preview {
   width: min(1100px, 94vw);
   height: min(760px, 88vh);
+  max-width: 100%;
+  max-height: 100%;
+  position: relative;
   display: flex;
   flex-direction: column;
   background: #171e2b;
@@ -1130,6 +1159,74 @@ progress::-webkit-progress-value {
   overflow: auto;
   background: #101620;
 }
+.preview-editor {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  background: #101620;
+  color: #c8d2e5;
+  border: none;
+  padding: 20px;
+  font:
+    13px/1.7 "DejaVu Sans Mono",
+    monospace;
+  resize: none;
+  outline: none;
+  white-space: pre;
+  overflow: auto;
+  tab-size: 4;
+}
+.preview-editor-stack {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: #101620;
+}
+.preview-editor-hl {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 20px;
+  font:
+    13px/1.7 "DejaVu Sans Mono",
+    monospace;
+  white-space: pre;
+  tab-size: 4;
+  overflow: hidden;
+  color: #c8d2e5;
+  pointer-events: none;
+}
+.preview-editor-over {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  color: transparent;
+  caret-color: #c8d2e5;
+}
+.preview-editor-composing {
+  color: #c8d2e5;
+}
+.preview-confirm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.preview-confirm button {
+  font-size: 11px;
+}
+.preview-editor::-webkit-scrollbar,
+.preview-editor::-webkit-scrollbar-thumb,
+.preview-editor::-webkit-scrollbar-track,
+.preview-scroll::-webkit-scrollbar,
+.preview-scroll::-webkit-scrollbar-thumb,
+.preview-scroll::-webkit-scrollbar-track {
+  cursor: default;
+}
 .preview-scroll pre {
   margin: 0;
   padding: 20px;
@@ -1180,6 +1277,42 @@ progress::-webkit-progress-value {
     transform: rotate(360deg);
   }
 }
+.preview-overlay-max {
+  padding: 0;
+}
+.file-preview.maximized {
+  width: 100vw;
+  height: 100vh;
+  border-radius: 0;
+}
+.preview-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  touch-action: none;
+}
+.preview-resize-handle span {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid #4a5878;
+  border-bottom: 2px solid #4a5878;
+  border-bottom-right-radius: 4px;
+}
+.preview-resize-handle:hover span,
+.preview-resize-handle:focus-visible span {
+  border-color: #7e94dc;
+}
+.resizing-preview,
+.resizing-preview * {
+  cursor: nwse-resize !important;
+  user-select: none !important;
+}
 
 .preview-highlight-info {
   padding: 7px 20px;
@@ -1188,47 +1321,69 @@ progress::-webkit-progress-value {
   border-bottom: 1px solid #222c3e;
   background: #151d2a;
 }
-.preview-scroll .hljs-tag {
+.preview-scroll .hljs-tag,
+.preview-editor-hl .hljs-tag {
   color: #94a6c1;
 }
 .preview-scroll .hljs-name,
+.preview-editor-hl .hljs-name,
 .preview-scroll .hljs-selector-tag,
+.preview-editor-hl .hljs-selector-tag,
 .preview-scroll .hljs-title,
-.preview-scroll .hljs-section {
+.preview-editor-hl .hljs-title,
+.preview-scroll .hljs-section,
+.preview-editor-hl .hljs-section {
   color: #88bbff;
 }
 .preview-scroll .hljs-attr,
+.preview-editor-hl .hljs-attr,
 .preview-scroll .hljs-attribute,
-.preview-scroll .hljs-variable {
+.preview-editor-hl .hljs-attribute,
+.preview-scroll .hljs-variable,
+.preview-editor-hl .hljs-variable {
   color: #e5c68d;
 }
 .preview-scroll .hljs-string,
+.preview-editor-hl .hljs-string,
 .preview-scroll .hljs-symbol,
-.preview-scroll .hljs-bullet {
+.preview-editor-hl .hljs-symbol,
+.preview-scroll .hljs-bullet,
+.preview-editor-hl .hljs-bullet {
   color: #a6ce99;
 }
 .preview-scroll .hljs-keyword,
+.preview-editor-hl .hljs-keyword,
 .preview-scroll .hljs-type,
+.preview-editor-hl .hljs-type,
 .preview-scroll .hljs-literal,
-.preview-scroll .hljs-meta {
+.preview-editor-hl .hljs-literal,
+.preview-scroll .hljs-meta,
+.preview-editor-hl .hljs-meta {
   color: #c9a3ef;
 }
 .preview-scroll .hljs-number,
+.preview-editor-hl .hljs-number,
 .preview-scroll .hljs-built_in {
   color: #e9ac81;
 }
 .preview-scroll .hljs-comment,
-.preview-scroll .hljs-quote {
+.preview-editor-hl .hljs-comment,
+.preview-scroll .hljs-quote,
+.preview-editor-hl .hljs-quote {
   color: #7c8b9e;
   font-style: italic;
 }
 .preview-scroll .hljs-error,
-.preview-scroll .hljs-deletion {
+.preview-editor-hl .hljs-error,
+.preview-scroll .hljs-deletion,
+.preview-editor-hl .hljs-deletion {
   color: #f0979f;
 }
-.preview-scroll .hljs-warning {
+.preview-scroll .hljs-warning,
+.preview-editor-hl .hljs-warning {
   color: #e5c68d;
 }
-.preview-scroll .hljs-addition {
+.preview-scroll .hljs-addition,
+.preview-editor-hl .hljs-addition {
   color: #a6ce99;
 }
