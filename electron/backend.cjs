@@ -3,6 +3,9 @@ const { PreviewReader } = require("./preview.cjs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
+const runFile = promisify(execFile);
 const { EventEmitter } = require("node:events");
 
 function validateDevice(d) {
@@ -720,6 +723,32 @@ class SSHService extends EventEmitter {
       uid: st.uid,
       gid: st.gid,
     };
+  }
+  async compress(id, targets) {
+    if (!Array.isArray(targets) || !targets.length || targets.some((p) => typeof p !== "string" || !p || p.includes("\0"))) throw Error("压缩目标无效");
+    const quote = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
+    const paths = id ? path.posix : path;
+    const items = [];
+    for (const target of targets) {
+      const st = id ? await call(this.sftp(id), "stat", target) : await fs.stat(target);
+      if (!st.isDirectory()) throw Error("仅支持压缩文件夹");
+      items.push({ target, parent: paths.dirname(target), name: paths.basename(target) });
+    }
+    const output = paths.join(items[0].parent, items.length === 1 ? `${items[0].name}.tar.gz` : "archive.tar.gz");
+    if (id) {
+      const session = this.sessions.get(id), client = session?.clients.at(-1);
+      if (!client || session.closed) throw Error("SSH 会话不可用");
+      const cmd = `tar -czf ${quote(output)} -C ${quote(items[0].parent)} ${items.map((x) => quote(x.name)).join(" ")}`;
+      await new Promise((resolve, reject) => client.exec(cmd, (err, stream) => {
+        if (err) return reject(err);
+        let stderr = "";
+        stream.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+        stream.on("close", (code) => code === 0 ? resolve() : reject(Error(stderr.trim() || `tar 退出码 ${code}`)));
+      }));
+    } else {
+      await runFile("tar", ["-czf", output, "-C", items[0].parent, ...items.map((x) => x.name)]);
+    }
+    return output;
   }
   async saveFile(id, filePath, content, baseMtime, force = false) {
     if (typeof filePath !== "string" || !filePath || filePath.includes("\0"))

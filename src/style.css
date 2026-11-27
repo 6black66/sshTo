@@ -1188,7 +1188,7 @@ progress::-webkit-progress-value {
   position: absolute;
   inset: 0;
   margin: 0;
-  padding: 20px;
+  padding: 20px 20px 20px 64px;
   font:
     13px/1.7 "DejaVu Sans Mono",
     monospace;
@@ -1206,7 +1206,31 @@ progress::-webkit-progress-value {
   background: transparent;
   color: transparent;
   caret-color: #c8d2e5;
+  padding-left: 64px;
 }
+.preview-line-numbers {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 1;
+  width: 44px;
+  margin: 0;
+  padding: 20px 8px 20px 0;
+  overflow: hidden;
+  border-right: 1px solid #273144;
+  color: #64738d;
+  text-align: right;
+  font: 13px/1.7 "DejaVu Sans Mono", monospace;
+  white-space: pre;
+  pointer-events: none;
+}
+.preview-search {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 14px;
+  background: #202a3b;
+}
+.preview-search input { flex: 1; min-width: 0; }
 .preview-editor-composing {
   color: #c8d2e5;
 }
@@ -1237,6 +1261,25 @@ progress::-webkit-progress-value {
   tab-size: 4;
   user-select: text;
   min-height: 0;
+}
+.preview-scroll {
+  position: relative;
+}
+.preview-scroll .preview-readonly-line-numbers {
+  position: absolute;
+  top: 0;
+  left: 0;
+  min-height: 0;
+  width: 44px;
+  padding: 20px 8px 20px 0;
+  border-right: 1px solid #273144;
+  color: #64738d;
+  text-align: right;
+  user-select: none;
+  pointer-events: none;
+}
+.preview-scroll > pre:not(.preview-readonly-line-numbers) {
+  padding-left: 64px;
 }
 .preview-message {
   flex: 1;

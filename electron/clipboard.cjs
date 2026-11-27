@@ -155,6 +155,11 @@ function createClipboardHandlers(win, service, { clipboard, Menu }) {
           click: () => send("preview"),
         },
         {
+          label: "压缩为 tar.gz",
+          enabled: options.hasSelection && options.allDirectories === true,
+          click: () => send("compress"),
+        },
+        {
           label: "属性",
           enabled: single,
           click: () => send("stat"),

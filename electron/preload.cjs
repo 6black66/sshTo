@@ -19,6 +19,7 @@ const channels = new Set([
   "files:delete",
   "files:paste",
   "files:stat",
+  "files:compress",
   "files:save",
   "files:open",
   "files:menu",

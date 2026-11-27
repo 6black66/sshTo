@@ -108,6 +108,7 @@ app.whenReady().then(async () => {
     "files:paste": (id, op, sources, dest, recordUndo) =>
       service.paste(id, op, sources, dest, recordUndo !== false),
     "files:stat": (id, target) => service.stat(id, target),
+    "files:compress": (id, targets) => service.compress(id, targets),
     "files:save": (id, p, content, baseMtime, force) =>
       service.saveFile(id, p, content, baseMtime, force === true),
     "files:open": async (p) => {

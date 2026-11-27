@@ -54,9 +54,17 @@ export default function FilePreview({
     [composing, setComposing] = useState(false);
   const panel = useRef<HTMLDivElement>(null);
   const editorHl = useRef<HTMLPreElement>(null);
+  const previewScroll = useRef<HTMLDivElement>(null);
+  const scrollTop = useRef(0);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const searchInput = useRef<HTMLInputElement>(null);
   const highlighter = useRef<Worker | undefined>(undefined);
   const dirty = editing && !!result && text !== result.text;
   useEffect(() => () => highlighter.current?.terminate(), []);
+  useEffect(() => {
+    if (searchOpen) searchInput.current?.focus();
+  }, [searchOpen]);
   useEffect(() => {
     if (!editing || !result) {
       setEditHtml(null);
@@ -198,8 +206,13 @@ export default function FilePreview({
         onKeyDown={(e) => {
           if (e.key === "Escape") {
             e.stopPropagation();
-            if (closeAsk) setCloseAsk(false);
+            if (searchOpen) setSearchOpen(false);
+            else if (closeAsk) setCloseAsk(false);
             else requestClose();
+          }
+          if (!editing && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+            e.preventDefault();
+            setSearchOpen(true);
           }
           if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
             e.preventDefault();
@@ -271,7 +284,12 @@ export default function FilePreview({
                 if (!result) return;
                 setText(result.text);
                 setStatus("");
+                scrollTop.current = previewScroll.current?.scrollTop || 0;
                 setEditing(true);
+                requestAnimationFrame(() => {
+                  const editor = panel.current?.querySelector("textarea");
+                  if (editor) editor.scrollTop = scrollTop.current;
+                });
               }}
             >
               <Pencil size={15} />
@@ -317,6 +335,24 @@ export default function FilePreview({
             <button onClick={() => void save(true)}>覆盖保存</button>
           </div>
         )}
+        {searchOpen && !editing && (
+          <div className="preview-search">
+            <input ref={searchInput} aria-label="搜索文件内容" placeholder="搜索…" value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  const value = search.trim();
+                  if (!value || !result) return;
+                  const at = result.text.toLowerCase().indexOf(value.toLowerCase());
+                  if (at >= 0 && previewScroll.current) {
+                    const line = result.text.slice(0, at).split("\n").length - 1;
+                    previewScroll.current.scrollTop = line * 22.1 + 20;
+                  }
+                }
+              }} />
+            <button onClick={() => setSearchOpen(false)} title="关闭搜索">Esc</button>
+          </div>
+        )}
         {closeAsk && (
           <div className="preview-notice preview-confirm">
             有未保存的修改，确定关闭？
@@ -330,6 +366,7 @@ export default function FilePreview({
           </div>
         ) : result && editing ? (
           <div className="preview-editor-stack">
+            <pre className="preview-line-numbers" aria-hidden="true">{text.split("\n").map((_, i) => i + 1).join("\n")}</pre>
             {editHtml !== null && (
               <pre
                 ref={editorHl}
@@ -349,6 +386,7 @@ export default function FilePreview({
               value={text}
               onChange={(e) => setText(e.target.value)}
               onScroll={(e) => {
+                scrollTop.current = e.currentTarget.scrollTop;
                 const pre = editorHl.current;
                 if (pre) {
                   pre.scrollTop = e.currentTarget.scrollTop;
@@ -361,7 +399,8 @@ export default function FilePreview({
             />
           </div>
         ) : result ? (
-          <div className="preview-scroll">
+          <div className="preview-scroll" ref={previewScroll} onScroll={(e) => { scrollTop.current = e.currentTarget.scrollTop; }}>
+            <pre className="preview-readonly-line-numbers" aria-hidden="true">{result.text.split("\n").map((_, i) => i + 1).join("\n")}</pre>
             <HighlightedText text={result.text} path={file.path} />
             {!result.text && <div className="preview-message">此文件为空</div>}
           </div>

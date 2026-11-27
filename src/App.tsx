@@ -858,6 +858,7 @@ export default function App() {
       hasSelection: names.length > 0,
       selectionCount: names.length,
       entryCount: listing.entries.length,
+      allDirectories: names.length > 0 && names.every((name) => listing.entries.find((e) => e.name === name)?.directory),
       isFile:
         names.length === 1
           ? !listing.entries.find((e) => e.name === names[0])?.directory
@@ -895,6 +896,11 @@ export default function App() {
       if (single && !single.directory) openFile(side, listing, single);
     } else if (action === "stat") {
       if (single) void doStat(side, listing, single);
+    } else if (action === "compress") {
+      const targets = sel.map((name) => join(listing.path, name));
+      void api<string>("files:compress", side === "remote" ? active : null, targets)
+        .then(() => refreshSide(side, listing.path))
+        .catch(notify);
     }
   };
   const handleFileKeys = (
