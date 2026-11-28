@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Maximize2,
   Minimize2,
@@ -54,13 +54,32 @@ export default function FilePreview({
     [composing, setComposing] = useState(false);
   const panel = useRef<HTMLDivElement>(null);
   const editorHl = useRef<HTMLPreElement>(null);
+  const editorLineNumbers = useRef<HTMLPreElement>(null);
+  const editor = useRef<HTMLTextAreaElement>(null);
   const previewScroll = useRef<HTMLDivElement>(null);
   const scrollTop = useRef(0);
+  const scrollLeft = useRef(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
   const searchInput = useRef<HTMLInputElement>(null);
   const highlighter = useRef<Worker | undefined>(undefined);
   const dirty = editing && !!result && text !== result.text;
+  const syncEditorScroll = (top: number, left: number) => {
+    if (editorHl.current) {
+      editorHl.current.scrollTop = top;
+      editorHl.current.scrollLeft = left;
+    }
+    if (editorLineNumbers.current) editorLineNumbers.current.scrollTop = top;
+  };
+  // A textarea is mounted only after switching modes. Restore its position after
+  // layout, when its scroll height is available, rather than relying on a click
+  // handler racing React's render.
+  useLayoutEffect(() => {
+    if (!editing || !editor.current) return;
+    editor.current.scrollTop = scrollTop.current;
+    editor.current.scrollLeft = scrollLeft.current;
+    syncEditorScroll(scrollTop.current, scrollLeft.current);
+  }, [editing]);
   useEffect(() => () => highlighter.current?.terminate(), []);
   useEffect(() => {
     if (searchOpen) searchInput.current?.focus();
@@ -285,11 +304,8 @@ export default function FilePreview({
                 setText(result.text);
                 setStatus("");
                 scrollTop.current = previewScroll.current?.scrollTop || 0;
+                scrollLeft.current = previewScroll.current?.scrollLeft || 0;
                 setEditing(true);
-                requestAnimationFrame(() => {
-                  const editor = panel.current?.querySelector("textarea");
-                  if (editor) editor.scrollTop = scrollTop.current;
-                });
               }}
             >
               <Pencil size={15} />
@@ -366,7 +382,7 @@ export default function FilePreview({
           </div>
         ) : result && editing ? (
           <div className="preview-editor-stack">
-            <pre className="preview-line-numbers" aria-hidden="true">{text.split("\n").map((_, i) => i + 1).join("\n")}</pre>
+            <pre ref={editorLineNumbers} className="preview-line-numbers" aria-hidden="true">{text.split("\n").map((_, i) => i + 1).join("\n")}</pre>
             {editHtml !== null && (
               <pre
                 ref={editorHl}
@@ -377,6 +393,7 @@ export default function FilePreview({
               />
             )}
             <textarea
+              ref={editor}
               className={
                 "preview-editor" +
                 (editHtml !== null ? " preview-editor-over" : "") +
@@ -387,11 +404,8 @@ export default function FilePreview({
               onChange={(e) => setText(e.target.value)}
               onScroll={(e) => {
                 scrollTop.current = e.currentTarget.scrollTop;
-                const pre = editorHl.current;
-                if (pre) {
-                  pre.scrollTop = e.currentTarget.scrollTop;
-                  pre.scrollLeft = e.currentTarget.scrollLeft;
-                }
+                scrollLeft.current = e.currentTarget.scrollLeft;
+                syncEditorScroll(scrollTop.current, scrollLeft.current);
               }}
               onCompositionStart={() => setComposing(true)}
               onCompositionEnd={() => setComposing(false)}
@@ -399,7 +413,10 @@ export default function FilePreview({
             />
           </div>
         ) : result ? (
-          <div className="preview-scroll" ref={previewScroll} onScroll={(e) => { scrollTop.current = e.currentTarget.scrollTop; }}>
+          <div className="preview-scroll" ref={previewScroll} onScroll={(e) => {
+            scrollTop.current = e.currentTarget.scrollTop;
+            scrollLeft.current = e.currentTarget.scrollLeft;
+          }}>
             <pre className="preview-readonly-line-numbers" aria-hidden="true">{result.text.split("\n").map((_, i) => i + 1).join("\n")}</pre>
             <HighlightedText text={result.text} path={file.path} />
             {!result.text && <div className="preview-message">此文件为空</div>}
